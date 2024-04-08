@@ -165,6 +165,8 @@ class Framework:
                     torch_dtype=torch_dtype,
                     max_memory={i: f'{free_in_GB-5}GB' for i in range(torch.cuda.device_count())},
                     load_in_8bit=self.args.load_int8,
+                    # fish: add for offload
+                    offload_folder = './offload',
                 )
             model.eval()
 

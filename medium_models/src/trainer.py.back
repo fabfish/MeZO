@@ -1,5 +1,3 @@
-# fish : This version tests with bimask sparsity
-
 ########## The following part is copied from Transformers' trainer (3.4.0) and later ported to be compatible with v4.4.2 and to support initialization from linear head probing. ##########
 
 # coding=utf-8
@@ -70,7 +68,6 @@ import torch.nn.functional as F
 
 from src.linearhead_trainer import LinearHeadTrainer
 from transformers.trainer_callback import TrainerState
-import torch.autograd as autograd   
 
 import copy
 
@@ -79,169 +76,6 @@ _use_apex = False
 
 DEFAULT_CALLBACKS = [DefaultFlowCallback]
 DEFAULT_PROGRESS_CALLBACK = ProgressCallback
-
-N = 2
-M = 4
-I = 2
-G = 2
-
-
-def get_best_permutation(w):    
-    length = w.numel()
-    group = int(length / M)
-    # print(w.shape)
-    w = w.t()
-    mask_sum_max = 0
-    num_perm = G
-    permutation = [v for v in range(w.size(0))]     
-    p = np.random.permutation(permutation)        
-    best_perm = permutation.copy()                  
-    w_tmp = w.detach().abs().reshape(group, M)
-    index = torch.argsort(w_tmp, dim=1)[:, :int(M - N)]
-    mask_f = torch.ones(w_tmp.shape, device=w_tmp.device)
-    mask_f = mask_f.scatter_(dim=1, index=index, value=0).reshape(w.shape)      
-
-    for i in range(num_perm):
-        mask = mask_f[p]
-        w_t = w[p]
-
-        # backward mask
-        w_s = w_t * mask
-        w_backward = w_s.t()
-        
-        w_tmp = w_backward.abs().reshape(group, M)
-        index = torch.argsort(w_tmp, dim=1)[:, :int(M - N)]
-        mask_b = torch.ones(w_tmp.shape, device=w_tmp.device)
-        mask_b = mask_b.scatter_(dim=1, index=index, value=0).reshape(w_backward.shape).t()
-        final_mask = mask * mask_b
-        if final_mask.sum() > mask_sum_max:
-            mask_sum_max = final_mask.sum()
-            best_perm = p
-        p = np.random.permutation(permutation)
-    return best_perm
-
-def get_n_m_sparse_matrix(w):
-    length = w.numel()
-    group = int(length / M)
-    w_tmp = w.t().detach().abs().reshape(group, M)
-    index = torch.argsort(w_tmp, dim=1)[:, :int(M - N)]
-    mask = torch.ones(w_tmp.shape, device=w_tmp.device)
-    mask = mask.scatter_(dim=1, index=index, value=0).reshape(w.t().shape).t()
-    return w * mask, mask
-
-def get_n_m_backward_matrix(forward_mask, w_s, permutation):
-    w_s = w_s.t()
-    forward_mask = forward_mask.t()
-    length = w_s.numel()
-    group = int(length / M)
-
-    # change with the permutation
-    mask = forward_mask[permutation]
-    w_backward = w_s[permutation]
-    w_backward = w_backward.t()
-    
-    # get the backwardmask
-    w_tmp = w_backward.abs().reshape(group, M)
-    index = torch.argsort(w_tmp, dim=1)[:, :int(M - N)]
-    mask_b = torch.ones(w_tmp.shape, device=w_tmp.device)
-    mask_b = mask_b.scatter_(dim=1, index=index, value=0).reshape(w_backward.shape).t()
-    final_mask = mask * mask_b
-
-    # recover the backwardmask with best permutation
-    idx = torch.tensor(np.array([permutation])).t().repeat_interleave(w_s.size(1), dim=1)
-    idx = idx.to(device=w_s.device)
-    B_M = torch.zeros(w_s.size(), device=w_s.device).scatter_(dim=0, index=idx, src=final_mask).t()
-
-    return B_M
-
-class MyConv2d_Lay(autograd.Function):
-    @staticmethod
-    def forward(ctx, weight, inp_unf, forward_mask, backward_mask, bias, decay = 0.0002):
-        ctx.save_for_backward(weight, inp_unf, backward_mask)
-        w_s = weight * forward_mask
-
-        ctx.decay = decay
-        ctx.mask = forward_mask       
-
-        out_unf = inp_unf.matmul(w_s) + bias
-        return out_unf
-
-    @staticmethod
-    def backward(ctx, g):
-        
-        weight, inp_unf, backward_mask = ctx.saved_tensors
-        w_s = (weight * backward_mask).t()
-
-        g_w_s = inp_unf.transpose(1,2).matmul(g)
-        g_w_s = g_w_s + ctx.decay * (1 - ctx.mask) * weight
-        g_inp_unf = g.matmul(w_s)
-        g_b = g.sum(dim=1)
-
-        return g_w_s , g_inp_unf, None, None, g_b, None
-
-class MyConv2d_Lay_f(autograd.Function):
-    @staticmethod
-    def forward(ctx, weight, inp_unf, forward_mask, backward_mask, bias, decay = 0.0002):
-        # ctx.save_for_backward(weight, inp_unf, backward_mask)
-        w_s = weight * forward_mask
-
-        # ctx.decay = decay
-        # ctx.mask = forward_mask       
-
-        out_unf = inp_unf.matmul(w_s) + bias
-        return out_unf
-
-class NMConvFull(nn.Linear):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.N = N
-        self.M = M
-        self.flag = False
-        self.iter = 0
-        self.max_iter = I
-        self.permute_idx = [v for v in range(self.weight.size(0))]
-        self.forward_mask = torch.zeros(self.weight.t().shape).requires_grad_(False)
-        self.backward_mask = torch.zeros(self.weight.t().shape).requires_grad_(False)
-
-    def forward(self, x):
-
-        w = self.weight.t()
-        if self.iter % self.max_iter == 0:
-            self.permute_idx = get_best_permutation(w)
-        w_s, self.forward_mask = get_n_m_sparse_matrix(w)
-        self.backward_mask = get_n_m_backward_matrix(self.forward_mask, w_s, self.permute_idx)
-
-        # print("bias:\n",self.bias)
-        out = MyConv2d_Lay.apply(w, x, self.forward_mask, self.backward_mask, self.bias)
-        self.iter += 1
-
-        return out
-
-class NMConv(nn.Linear):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.N = N
-        self.M = M
-        self.flag = False
-        self.iter = 0
-        self.max_iter = I
-        self.permute_idx = [v for v in range(self.weight.size(0))]
-        self.forward_mask = torch.zeros(self.weight.t().shape).requires_grad_(False)
-        # self.backward_mask = torch.zeros(self.weight.t().shape).requires_grad_(False)
-
-    def forward(self, x):
-
-        w = self.weight.t()
-        # if self.iter % self.max_iter == 0:
-            # self.permute_idx = get_best_permutation(w)
-        w_s, self.forward_mask = get_n_m_sparse_matrix(w)
-        # self.backward_mask = get_n_m_backward_matrix(self.forward_mask, w_s, self.permute_idx)
-
-        # print("bias:\n",self.bias)
-        out = MyConv2d_Lay_f.apply(w, x, self.forward_mask, 0, self.bias)
-        # self.iter += 1
-
-        return out
 
 if is_in_notebook():
     from transformers.utils.notebook import NotebookProgressCallback
@@ -607,40 +441,6 @@ class Trainer(LinearHeadTrainer):
             )
             scheduler.load_state_dict(torch.load(os.path.join(model_path, "scheduler.pt")))
 
-        ## nmconv
-        
-        mask_mode = True
-        # mask_mode = False
-        # import pdb; pdb.set_trace()
-        if mask_mode == True:
-            model = self.model
-            # Create a list of items to iterate over
-            items = list(model.named_modules())
-
-            for n, m in items:
-                if isinstance(m, nn.Linear):
-
-                    print("replacing {}".format(n))
-                    # new_module = LinearSparse(m.in_features, m.out_features).to(self.model.device)
-                    # new_module = IA3Layer(m.in_features, m.out_features).to(self.model.device)
-                    new_module = NMConv(m.in_features, m.out_features).to(self.model.device)
-                    # Copy the weights and biases
-                    new_module.weight.data = m.weight.data.clone()
-                    new_module.bias.data = m.bias.data.clone()
-                    # Replace the module
-                    name_parts = n.split('.')
-                    parent = model
-                    for part in name_parts[:-1]:
-                        parent = getattr(parent, part)
-                    setattr(parent, name_parts[-1], new_module)
-
-            for name, param in model.named_parameters():
-                if not "scores" in name:
-                    param.requires_grad_(False)
-
-            self.model = model            
-        flag = 1
-
         model = self.model
 
         if self.args.fp16 and _use_apex:
@@ -661,8 +461,6 @@ class Trainer(LinearHeadTrainer):
                 find_unused_parameters=True,
             )
 
-
-        flag = 1
         # Train
         if transformers.is_torch_tpu_available():
             total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
@@ -812,7 +610,6 @@ class Trainer(LinearHeadTrainer):
 
                                 # second function evaluation
                                 if self.args.efficient_zero_order:
-                                    # This
                                     model = self.efficient_perturb_parameters(model, random_seed, scaling_factor=-2)
                                 elif self.args.zo_variant is not None:
                                     model, random_vector = self.norm_perturb_parameters(model, random_vector, scaling_factor=-2)
@@ -820,15 +617,6 @@ class Trainer(LinearHeadTrainer):
                                     model, random_vector = self.perturb_parameters(model, random_vector, scaling_factor=-2)                 
                                 loss2 = self.zo_forward(model, inputs)
 
-                            if flag ==1:
-                                # import pdb; pdb.set_trace()
-                                # count size of random_vector
-                                size = 0
-                                for name, param in random_vector.items():
-                                    size += param.numel()
-                                print("size of random_vector: ", size)
-                                flag = 0
-                                
                             projected_grad = (loss1 - loss2) / (2 * self.args.zero_order_eps)
 
                             # scale grad according to accumulation
@@ -872,12 +660,9 @@ class Trainer(LinearHeadTrainer):
                             else:
                                 model, random_vector = self.perturb_parameters(model, random_vector)
 
-                            
-
                     # apply gradient updates
                     # if using trainer, follow trainer logic to clip grad and check if parameters should be updated
                     if self.args.zero_order_use_trainer_optim:
-                        # by default
                         if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
                             # last step in epoch but step is always smaller than gradient_accumulation_steps
                             len(epoch_iterator) <= self.args.gradient_accumulation_steps
@@ -902,7 +687,7 @@ class Trainer(LinearHeadTrainer):
                                     for _, p in model.named_parameters():
                                         if p.grad is not None:
                                             norm += torch.sum(p.grad ** 2)
-                                    norm = torch.sqrt(torch.tensor(norm))
+                                    norm = torch.sqrt(norm)
                                 logs["grad_norm"] = norm.item()
                                 logs["learning_rate"] = (
                                     scheduler.get_last_lr()[0]
@@ -915,7 +700,6 @@ class Trainer(LinearHeadTrainer):
                                 logs["max_steps"] = self.args.max_steps
                                 logs["max_zo_forward_steps"] = self.args.max_zo_forward_steps
                                 logs["time"] = int(time.time() - start_time)
-                                logs["memory_usage2"] = torch.cuda.memory_allocated() / 1024 ** 3
                                 self.log(logs)
                                 logger.info(str(logs))
                             
@@ -950,7 +734,6 @@ class Trainer(LinearHeadTrainer):
                                 logs["max_steps"] = self.args.max_steps
                                 logs["max_zo_forward_steps"] = self.args.max_zo_forward_steps
                                 logs["time"] = int(time.time() - start_time)
-                                logs["memory_usage3"] = torch.cuda.memory_allocated() / 1024 ** 3
                                 self.log(logs)
                                 logger.info(str(logs))
 
@@ -1010,7 +793,6 @@ class Trainer(LinearHeadTrainer):
                                 if version.parse(torch.__version__) >= version.parse("1.4")
                                 else scheduler.get_lr()[0]
                             )
-                            logs["memory_usage4"] = torch.cuda.memory_allocated() / 1024 ** 3
                             logging_loss_scalar = tr_loss_scalar
 
                             self.log(logs)

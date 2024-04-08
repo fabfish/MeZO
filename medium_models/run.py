@@ -821,7 +821,9 @@ def main():
             model_args.config_name if model_args.config_name else model_args.model_name_or_path,
             num_labels=num_labels,
             finetuning_task=data_args.task_name,
-            cache_dir=model_args.cache_dir
+            cache_dir=model_args.cache_dir,
+            # add to prevent loading the config from the HF model hub
+            local_files_only=True,
         )
 
     if training_args.untie_emb:
@@ -845,6 +847,7 @@ def main():
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         additional_special_tokens=special_tokens,
         cache_dir=model_args.cache_dir,
+        local_files_only=True,
     )
     if "opt" in model_args.model_name_or_path:
         # Set SEP token

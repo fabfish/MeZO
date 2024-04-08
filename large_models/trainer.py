@@ -35,6 +35,13 @@ import copy
 from metrics import f1
 import numpy as np
 
+# import os
+# fish: add for proxy
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['HTTP_PROXY'] = "http://127.0.0.1:7890"
+os.environ['HTTPS_PROXY'] = "http://127.0.0.1:7890"
+os.environ['ALL_PROXY'] = "socks5://127.0.0.1:7890"
+
 from tqdm.auto import tqdm
 from transformers import Trainer
 from sklearn.linear_model import LinearRegression, LogisticRegression, LogisticRegressionCV

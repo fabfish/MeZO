@@ -92,7 +92,12 @@ class LoRALinear(nn.Linear):
         if self.r > 0 and not self.merged:
             result = F.linear(x, T(self.weight), bias=self.bias)
             if self.r > 0:
-                result += (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
+                # debug
+                # print(x.dtype, self.lora_dropout(x).dtype, self.lora_A.dtype, type(self.scaling))
+
+                # result += (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
+                # modified from above for mixed precision error
+                result += (self.lora_dropout(x).to(self.lora_A.dtype) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
             return result
         else:
             return F.linear(x, T(self.weight), bias=self.bias)
