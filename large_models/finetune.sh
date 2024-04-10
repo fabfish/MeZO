@@ -1,6 +1,7 @@
 MODEL=${MODEL:-facebook/opt-1.3b}
 MODEL_NAME=(${MODEL//\// })
 MODEL_NAME="${MODEL_NAME[-1]}"
+MASK_ONLY=${MASK_ONLY:-"--mask_only_mode False"}
 
 EPOCH=${EPOCH:-5}
 BS=${BS:-8}
@@ -68,6 +69,8 @@ python run.py \
     --learning_rate $LR --num_train_epochs $EPOCH --per_device_train_batch_size $BS \
     --load_best_model_at_end --evaluation_strategy epoch --save_strategy epoch --save_total_limit 1 \
     --train_as_classification \
+    --lr_scheduler_type "linear" \
     $EXTRA_ARGS \
     $TASK_ARGS \
+    $MASK_ONLY \
     "$@"

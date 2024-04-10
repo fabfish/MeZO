@@ -1,6 +1,8 @@
 MODEL=${MODEL:-facebook/opt-1.3b}
 MODEL_NAME=(${MODEL//\// })
+MASK_ONLY=${MASK_ONLY:-"--mask_only_mode False"}
 MODEL_NAME="${MODEL_NAME[-1]}"
+
 
 BS=${BS:-16}
 LR=${LR:-1e-5}
@@ -11,6 +13,8 @@ DEV=${DEV:-500}
 EVAL=${EVAL:-1000}
 STEPS=${STEPS:-20000}
 EVAL_STEPS=${EVAL_STEPS:-4000}
+
+
 
 MODE=${MODE:-ft}
 EXTRA_ARGS=""
@@ -63,4 +67,5 @@ python run.py \
     --train_as_classification \
     $EXTRA_ARGS \
     $TASK_ARGS \
+    $MASK_ONLY \
     "$@"

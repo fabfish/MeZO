@@ -35,12 +35,19 @@ import copy
 from metrics import f1
 import numpy as np
 
+import torch.nn.functional as F
+
+VRPGE_mode = False
+mask_only_mode = True
+
 # import os
 # fish: add for proxy
 os.environ['CURL_CA_BUNDLE'] = ''
 os.environ['HTTP_PROXY'] = "http://127.0.0.1:7890"
 os.environ['HTTPS_PROXY'] = "http://127.0.0.1:7890"
 os.environ['ALL_PROXY'] = "socks5://127.0.0.1:7890"
+if mask_only_mode:
+    os.environ["WANDB_PROJECT"] = "Masked-only-" 
 
 from tqdm.auto import tqdm
 from transformers import Trainer
@@ -216,6 +223,178 @@ OPTIMIZER_NAME = "optimizer.pt"
 SCHEDULER_NAME = "scheduler.pt"
 SCALER_NAME = "scaler.pt"
 
+############################################
+# following modules are for masked finetuning
+# masked bert: normal optimizer, sample mask + finetune
+# vrpge: vrpge update, mask + finetune
+# mask only vrpge: mask tuning
+# mezo: fo ft
+# mask only mezo: mask tuning
+class _Binarizer3(torch.autograd.Function):
+    # method based on masking as an efficient alternative to finetuning
+    @staticmethod
+    def forward(ctx, inputs):
+        return torch.bernoulli(inputs).bool()
+
+    @staticmethod
+    def backward(ctx, gradOutput):
+        return gradOutput
+    
+class linear(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, weight, bias=None, mask=None):
+        ctx.with_mask = False
+        if mask is not None:
+            weight = weight * torch.bernoulli(mask)
+            # note that mask is of low precision
+            # mask f16, weight f32
+            # import pdb; pdb.set_trace()
+            ctx.with_mask = True
+
+        ctx.save_for_backward(weight, bias, x)
+        ctx.weight_dtype = weight.dtype
+        ctx.mask_dtype = mask.dtype if mask is not None else None
+        return F.linear(x, weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_input = grad_weight = grad_bias = grad_mask =  None
+
+        tensors = ctx.saved_tensors
+        weight, bias, input = tensors
+        # 32, 32, 16
+
+        if ctx.needs_input_grad[0]:
+            grad_input = grad_output.matmul(weight.to(dtype=grad_output.dtype))
+
+        if ctx.needs_input_grad[1]:
+
+            grad_weight = grad_output.transpose(-2, -1).matmul(input).to(dtype=grad_output.dtype)
+
+            if ctx.with_mask and ctx.needs_input_grad[3]:
+
+                # grad_mask = grad_output.transpose(-2, -1).matmul(input.to(dtype=ctx.mask_dtype))
+                grad_mask = grad_output.transpose(-2, -1).matmul(input.to(dtype=grad_output.dtype))
+
+        if bias is not None and ctx.needs_input_grad[2]:
+            grad_bias = grad_output.sum(0)
+
+        if ctx.with_mask and ctx.needs_input_grad[3]:
+
+            if grad_mask is None:
+                # grad_mask = grad_output.transpose(-2, -1).matmul(input.to(dtype=ctx.mask_dtype))
+                grad_mask = grad_output.transpose(-2, -1).matmul(input.to(dtype=grad_output.dtype))
+
+        # import pdb; pdb.set_trace()
+
+        # return grad_input, grad_weight, grad_bias, grad_mask
+        # if scores is half, the output will be
+        # f16, None, f16, f16
+
+        # unknown amp scaler error /home/*/anaconda3/lib/python3.10/site-packages/torch/cuda/amp/grad_scaler.py", line 258
+        # return grad_input.float(), grad_weight, grad_bias.float(), grad_mask.float()
+        return grad_input, grad_weight, grad_bias, grad_mask
+    
+class StraightThroughBinomialSampleNoGrad(torch.autograd.Function):
+    # method took from vrpge
+    @staticmethod
+    def forward(ctx, scores):
+        output = (torch.rand_like(scores) < scores).float()
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        return torch.zeros_like(grad_outputs)
+
+class MaskedLinear(nn.Linear):
+    '''
+    update: gradient based
+    '''
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scores = nn.Parameter(torch.Tensor(self.weight.size()),requires_grad=True, )
+        self.train_weights = False
+        if self.train_weights == False:
+            self.weight.requires_grad_(False)
+        self.score_init_constant = 0.50
+        # it is important to set to half precision
+        self.scores.data = (
+            # torch.ones_like(self.scores).half() * self.score_init_constant
+            torch.ones_like(self.scores) * self.score_init_constant
+        )
+
+    @property
+    def clamped_scores(self):
+        return self.scores
+
+    def forward(self, x):
+        if True:
+            # keep scores > 0 
+            self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+            # self.subnet = StraightThroughBinomialSampleNoGrad.apply(self.scores)
+            
+            # self.subnet = _Binarizer3.apply(self.scores)
+
+            # w = self.weight * self.subnet
+            # w = w.to(self.weight.dtype)
+            # x = x.to(self.weight.dtype)
+            try:
+                # x = F.linear(x, w, self.bias)
+                x = linear.apply(x, self.weight, self.bias, self.scores)
+            except:
+                import pdb; pdb.set_trace()
+        else:
+            w = self.weight * self.subnet
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+
+        return x
+
+class VRPGELinear(nn.Linear):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scores = nn.Parameter(torch.Tensor(self.weight.size()))
+        self.register_buffer('subnet', torch.zeros_like(self.scores))
+        self.train_weights = False
+        if self.train_weights == False:
+            self.weight.requires_grad_(False)
+        self.score_init_constant = 0.50
+        self.scores.data = (
+                torch.ones_like(self.scores) * self.score_init_constant
+        )
+        self.register_buffer("stored_mask_0", torch.zeros_like(self.scores))
+        self.register_buffer("stored_mask_1", torch.zeros_like(self.scores))
+        self.j = 0
+        self.subnet = torch.zeros_like(self.scores)
+
+    @property
+    def clamped_scores(self):
+        return self.scores
+
+    def fix_subnet(self):
+        self.subnet = (torch.rand_like(self.scores) < self.clamped_scores).float()
+
+    def forward(self, x):
+        if True:
+            # keep scores > 0 
+            self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+            self.subnet = StraightThroughBinomialSampleNoGrad.apply(self.scores)
+            # self.subnet = _Binarizer3.apply(self.scores)
+            if self.j == 0:
+                self.stored_mask_0.data = (self.subnet-self.scores)/torch.sqrt((self.scores+1e-20)*(1-self.scores+1e-20))
+                self.j = 1
+            else:
+                self.stored_mask_1.data = (self.subnet-self.scores)/torch.sqrt((self.scores+1e-20)*(1-self.scores+1e-20))
+                self.j = 0
+            w = self.weight * self.subnet
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+        else:
+            w = self.weight * self.subnet
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+
+        return x
 
 class OurTrainer(Trainer):
 
@@ -231,6 +410,51 @@ class OurTrainer(Trainer):
         self._train_batch_size = batch_size
         # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
+
+        # Do the model before all the changes
+
+        print("################################################################")
+        print(self.args.mask_only_mode)
+        ## VRPGE
+        mask_mode = True
+        # VRPGE_mode=False
+        # import pdb; pdb.set_trace()
+        if mask_mode == True:
+            model = self.model
+            # Create a list of items to iterate over
+            items = list(model.named_modules())
+
+            for n, m in items:
+                if isinstance(m, nn.Linear):
+                    # if n.endswith("query") or n.endswith("value") or n.endswith("attention.output.dense"):
+                    # if "attention" in n or "output" in n:
+                    # if "attention" in n:
+                    # if n.endswith("attention.output.dense"):
+                    if n.endswith("out_proj") or n.endswith("k_proj") or n.endswith("v_proj") or n.endswith("fc1") or n.endswith("fc2"):
+                    # if n.endswith("v_proj"):
+                        print("replacing {}".format(n))
+                        # new_module = LinearSparse(m.in_features, m.out_features).to(self.model.device)
+                        # new_module = IA3Layer(m.in_features, m.out_features).to(self.model.device)
+                        # new_module = VRPGELinear(m.in_features, m.out_features).to(self.model.device)
+                        new_module = MaskedLinear(m.in_features, m.out_features).to(self.model.device)
+                        # Copy the weights and biases
+                        new_module.weight.data = m.weight.data.clone()
+                        new_module.bias.data = m.bias.data.clone()
+                        # Replace the module
+                        name_parts = n.split('.')
+                        parent = model
+                        for part in name_parts[:-1]:
+                            parent = getattr(parent, part)
+                        setattr(parent, name_parts[-1], new_module)
+
+            for name, param in model.named_parameters():
+                if not "scores" in name:
+                    # param.requires_grad_(False)
+                    pass
+
+            self.model = model            
+
+
 
         # MeZO added: Linear probing
         if self.args.linear_probing:
@@ -581,7 +805,10 @@ class OurTrainer(Trainer):
                                     gradients = xm._fetch_gradients(self.optimizer)
                                     xm.all_reduce("sum", gradients, scale=1.0 / xm.xrt_world_size())
                                 # AMP: gradients need unscaling
+                                # import pdb; pdb.set_trace()
+                                # check optimzer states here
                                 self.scaler.unscale_(self.optimizer)
+                                # self.scaler.unscale_(self.optimizer)
 
                             if is_sagemaker_mp_enabled() and args.fp16:
                                 self.optimizer.clip_master_grads(args.max_grad_norm)
@@ -697,6 +924,8 @@ class OurTrainer(Trainer):
 
         self.control = self.callback_handler.on_train_end(args, self.state, self.control)
 
+        if mask_only_mode:
+            import pdb; pdb.set_trace()
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
 
@@ -807,7 +1036,13 @@ class OurTrainer(Trainer):
         for name, param in self.named_parameters_to_optim:
             # Resample z
             z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
-            if "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
+            # if "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
+            #     param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
+            # else:
+            #     param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
+            if "scores" in name:
+                param.data = param.data - 10 * self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
+            elif "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
                 param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
             else:
                 param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
