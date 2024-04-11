@@ -424,6 +424,7 @@ class MaskedLinearS(nn.Linear):
             # w = self.weight * self.subnet
             # w = w.to(self.weight.dtype)
             # x = x.to(self.weight.dtype)
+
             try:
                 # x = F.linear(x, w, self.bias)
                 x = linear.apply(x, self.weight, self.bias, self.scores)
@@ -431,6 +432,10 @@ class MaskedLinearS(nn.Linear):
                 import pdb; pdb.set_trace()
 
             # logger.info("train mode")
+            # x = linear.apply(x, self.weight, self.bias, self.scores)
+
+            # w = self.weight * torch.bernoulli(self.scores)
+            # x = F.linear(x, self.weight, self.bias)
 
         else:
             
@@ -551,7 +556,7 @@ class OurTrainer(Trainer):
                             parent = getattr(parent, part)
                         setattr(parent, name_parts[-1], new_module)
 
-            import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()
             for name, param in model.named_parameters():
                 if not "lm" in name and not "embedding"  in name:
                 # if not "score" in name:
@@ -561,6 +566,11 @@ class OurTrainer(Trainer):
                     param.requires_grad_(False)
                     # pass
 
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    print(name)
+
+            import pdb; pdb.set_trace()
             self.model = model            
 
 
