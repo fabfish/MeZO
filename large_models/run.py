@@ -108,6 +108,7 @@ class OurArguments(TrainingArguments):
     sparsity: float = 0.95
 
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser = HfArgumentParser(OurArguments)
@@ -137,8 +138,9 @@ class Framework:
         """
         with count_time("Loading model with FP%d" % (16 if self.args.load_float16 else 32)):
             free_in_GB = int(torch.cuda.mem_get_info()[0]/1024**3)
-            config = AutoConfig.from_pretrained(self.args.model_name, )
-            config.save_pretrained("./config")
+            # config = AutoConfig.from_pretrained(self.args.model_name, )
+            config = AutoConfig.from_pretrained("./config")
+            # config.save_pretrained("./config")
             if self.args.untie_emb:
                 # Untie embeddings/LM head
                 logger.warn("Untie embeddings and LM head")
@@ -172,6 +174,7 @@ class Framework:
                     load_in_8bit=self.args.load_int8,
                     # fish: add for offload
                     offload_folder = './offload',
+
                 )
             model.eval()
 
@@ -435,7 +438,8 @@ class Framework:
         if self.args.resume_from_checkpoint is not None:
             last_checkpoint = self.args.resume_from_checkpoint
 
-        trainer.train(resume_from_checkpoint=last_checkpoint) 
+        # trainer.train(resume_from_checkpoint=last_checkpoint) 
+        trainer.train(resume_from_checkpoint=None) 
 
         # Explicitly save the model
         if self.args.save_model:
@@ -480,12 +484,12 @@ def main():
 
     # fish: add a prior eval round
     # Sample eval samples
-    if args.num_eval is not None:
-        eval_samples = task.sample_subset(data_split="valid", seed=args.train_set_seed, num=args.num_eval)
-    else:
-        eval_samples = task.valid_samples
-    metrics = framework.evaluate([], eval_samples) # No in-context learning if there is training
-    logger.info(metrics)
+    # if args.num_eval is not None:
+    #     eval_samples = task.sample_subset(data_split="valid", seed=args.train_set_seed, num=args.num_eval)
+    # else:
+    #     eval_samples = task.valid_samples
+    # metrics = framework.evaluate([], eval_samples) # No in-context learning if there is training
+    # logger.info(metrics)
 
     if args.train_set_seed is not None or args.num_train_sets is not None:
         # Eval samples share one (or multiple) training set(s)

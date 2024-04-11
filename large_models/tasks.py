@@ -2,6 +2,8 @@ from templates import *
 from utils import temp_seed
 import json
 import os
+#
+os.environ['HF_DATASETS_OFFLINE ']= "1"
 from datasets import load_dataset
 from dataclasses import dataclass
 from typing import List, Union
@@ -110,7 +112,10 @@ class SST2Dataset(Dataset):
         self.load_dataset(subtask, **kwargs)
         
     def load_dataset(self, path, **kwargs):
-        d = load_dataset('glue', 'sst2')
+        # d = load_dataset('glue', 'sst2', cache_dir="./data", download_mode="reuse_cache_if_exists", verification_mode = "no_checks")
+        # d = load_dataset('glue', 'sst2')
+        # d.save_to_disk('~/dataset/glue/sst2')
+        d = datasets.load_from_disk("~/dataset/glue/sst2")
         train_d = d["train"]
         validation_d = d["validation"]
         

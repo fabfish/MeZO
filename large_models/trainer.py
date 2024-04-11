@@ -38,7 +38,7 @@ import numpy as np
 import torch.nn.functional as F
 
 VRPGE_mode = False
-mask_only_mode = True
+# mask_only_mode = True
 
 # import os
 # fish: add for proxy
@@ -46,8 +46,11 @@ os.environ['CURL_CA_BUNDLE'] = ''
 os.environ['HTTP_PROXY'] = "http://127.0.0.1:7890"
 os.environ['HTTPS_PROXY'] = "http://127.0.0.1:7890"
 os.environ['ALL_PROXY'] = "socks5://127.0.0.1:7890"
+mask_only_mode = True
 if mask_only_mode:
     os.environ["WANDB_PROJECT"] = "Masked-only-" 
+
+os.environ['HF_DATASETS_OFFLINE ']= "1"
 
 from tqdm.auto import tqdm
 from transformers import Trainer
@@ -76,6 +79,7 @@ from packaging import version
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+
 
 from huggingface_hub import Repository
 
@@ -182,6 +186,8 @@ if is_apex_available():
     from apex import amp
 
 if is_datasets_available():
+    # 
+    os.environ['HF_DATASETS_OFFLINE '] = "1"
     import datasets
 
 if is_torch_tpu_available(check_device=False):
@@ -269,6 +275,8 @@ class linear(torch.autograd.Function):
 
         if ctx.needs_input_grad[0]:
             grad_input = grad_output.matmul(weight.to(dtype=grad_output.dtype))
+        else:
+            import pdb; pdb.set_trace()
 
         if ctx.needs_input_grad[1]:
 
@@ -315,19 +323,19 @@ class MaskedLinear(nn.Linear):
     '''
     def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None, sparsity = 0.95):
         super().__init__(in_features, out_features, bias, device, dtype)
-        self.scores = nn.Parameter(torch.Tensor(self.weight.size()),requires_grad=True, )
+        self.scores = nn.Parameter(torch.Tensor(self.weight.size()))
         self.train_weights = False
         if self.train_weights == False:
             self.weight.requires_grad_(False)
         
-        print(sparsity)
+        # print(sparsity)
         self.score_init_constant = sparsity
         # it is important to set to half precision
         self.scores.data = (
             # torch.ones_like(self.scores).half() * self.score_init_constant
             torch.ones_like(self.scores) * self.score_init_constant
         )
-        print(self.scores)
+        # print(self.scores)
 
     @property
     def clamped_scores(self):
@@ -374,6 +382,73 @@ class MaskedLinear(nn.Linear):
             x = F.linear(x, w, self.bias)
 
         return x
+    
+class MaskedLinearS(nn.Linear):
+    '''
+    update: gradient based
+    '''
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None, sparsity = 0.95):
+        super().__init__(in_features, out_features, bias, device, dtype)
+        self.scores = nn.Parameter(torch.Tensor(self.weight.size()))
+        self.train_weights = False
+        if self.train_weights == False:
+            self.weight.requires_grad_(False)
+        
+        # print(sparsity)
+        self.score_init_constant = sparsity
+        # it is important to set to half precision
+        self.scores.data = (
+            # torch.ones_like(self.scores).half() * self.score_init_constant
+            torch.ones_like(self.scores) * self.score_init_constant
+        )
+        # print(self.scores)
+
+    @property
+    def clamped_scores(self):
+        return self.scores
+
+    def forward(self, x):
+        if self.training:
+        # if True:
+        #     # logger.info("eval mode")
+        #     w = (self.weight > self.score_init_constant).float()
+        #     w = self.weight * w
+        #     x = F.linear(x, w, self.bias)
+        # else:
+            # logger.info("train mode")
+            # keep scores > 0 
+            self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+            # self.subnet = StraightThroughBinomialSampleNoGrad.apply(self.scores)
+            # self.subnet = _Binarizer3.apply(self.scores)
+
+            # w = self.weight * self.subnet
+            # w = w.to(self.weight.dtype)
+            # x = x.to(self.weight.dtype)
+            try:
+                # x = F.linear(x, w, self.bias)
+                x = linear.apply(x, self.weight, self.bias, self.scores)
+            except:
+                import pdb; pdb.set_trace()
+
+            # logger.info("train mode")
+
+        else:
+            
+
+            # w = self.weight * self.subnet
+            # w = (self.weight > self.score_init_constant).float()
+            # w = self.weight * w
+
+            # self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+
+            self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+            w = self.weight * torch.bernoulli(self.scores)
+
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+
+        return x
+
 
 class VRPGELinear(nn.Linear):
     def __init__(self, *args, **kwargs):
@@ -436,13 +511,13 @@ class OurTrainer(Trainer):
         # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
 
-        # Do the model before all the changes
+        # Do the layer replacing before all the change on the model
 
         print("################################################################")
         print(self.args.mask_only_mode)
         print(self.args.sparsity)
         ## VRPGE
-        mask_mode = True
+        mask_mode = self.args.mask_only_mode
         # VRPGE_mode=False
         # import pdb; pdb.set_trace()
         if mask_mode == True:
@@ -476,13 +551,15 @@ class OurTrainer(Trainer):
                             parent = getattr(parent, part)
                         setattr(parent, name_parts[-1], new_module)
 
-            # import pdb; pdb.set_trace()
+            import pdb; pdb.set_trace()
             for name, param in model.named_parameters():
-                # if not "scores" in name:
+                if not "lm" in name and not "embedding"  in name:
+                # if not "score" in name:
+                # if not "embedding" in name:
                 # if True:
-                if "proj" in name or "fc" in name or "layer_norm" in name:
-                    # param.requires_grad_(False)
-                    pass
+                # if "proj" in name or "fc" in name or "layer_norm" in name:
+                    param.requires_grad_(False)
+                    # pass
 
             self.model = model            
 
@@ -982,7 +1059,7 @@ class OurTrainer(Trainer):
 
         self.control = self.callback_handler.on_train_end(args, self.state, self.control)
 
-        if mask_only_mode:
+        if self.args.mask_only_mode:
             # import pdb; pdb.set_trace()
             print(model.model.decoder.layers[0].self_attn.k_proj.scores)
         return TrainOutput(self.state.global_step, train_loss, metrics)

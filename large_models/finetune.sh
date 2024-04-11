@@ -72,6 +72,7 @@ python run.py \
     --train_as_classification \
     --lr_scheduler_type "linear" \
     --sparsity $SPARSITY \
+    --overwrite_output_dir \
     $EXTRA_ARGS \
     $TASK_ARGS \
     $MASK_ONLY \
