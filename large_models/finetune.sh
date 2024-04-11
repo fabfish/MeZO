@@ -10,6 +10,7 @@ SEED=${SEED:-0}
 TRAIN=${TRAIN:-1000}
 DEV=${DEV:-500}
 EVAL=${EVAL:-1000}
+SPARSITY=${SPARSITY:-0.95}
 
 MODE=${MODE:-ft}
 EXTRA_ARGS=""
@@ -70,6 +71,7 @@ python run.py \
     --load_best_model_at_end --evaluation_strategy epoch --save_strategy epoch --save_total_limit 1 \
     --train_as_classification \
     --lr_scheduler_type "linear" \
+    --sparsity $SPARSITY \
     $EXTRA_ARGS \
     $TASK_ARGS \
     $MASK_ONLY \

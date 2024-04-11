@@ -105,6 +105,7 @@ class OurArguments(TrainingArguments):
 
     # mask only
     mask_only_mode: bool = False # only mask the input and predict the masked token
+    sparsity: float = 0.95
 
 
 def parse_args():
@@ -216,6 +217,7 @@ class Framework:
         input_ids = torch.tensor([input_ids]).to(self.model.device)
 
         if generation:
+            # print("True")
             args = self.args
             # Autoregressive generation
             outputs = self.model.generate(
@@ -475,6 +477,15 @@ def main():
 
     # Initialize trainer and load model
     framework = Framework(args, task)
+
+    # fish: add a prior eval round
+    # Sample eval samples
+    if args.num_eval is not None:
+        eval_samples = task.sample_subset(data_split="valid", seed=args.train_set_seed, num=args.num_eval)
+    else:
+        eval_samples = task.valid_samples
+    metrics = framework.evaluate([], eval_samples) # No in-context learning if there is training
+    logger.info(metrics)
 
     if args.train_set_seed is not None or args.num_train_sets is not None:
         # Eval samples share one (or multiple) training set(s)

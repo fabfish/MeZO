@@ -13,6 +13,7 @@ DEV=${DEV:-500}
 EVAL=${EVAL:-1000}
 STEPS=${STEPS:-20000}
 EVAL_STEPS=${EVAL_STEPS:-4000}
+SPARSITY=${SPARSITY:-0.95}
 
 
 
@@ -65,6 +66,7 @@ python run.py \
     --load_best_model_at_end --evaluation_strategy steps --save_strategy steps --save_total_limit 1 \
     --eval_steps $EVAL_STEPS --save_steps $EVAL_STEPS \
     --train_as_classification \
+    --sparsity $SPARSITY \
     $EXTRA_ARGS \
     $TASK_ARGS \
     $MASK_ONLY \

@@ -246,6 +246,9 @@ class linear(torch.autograd.Function):
         ctx.with_mask = False
         if mask is not None:
             weight = weight * torch.bernoulli(mask)
+
+            # weight = weight * torch.bernoulli(torch.sigmoid(mask))
+
             # note that mask is of low precision
             # mask f16, weight f32
             # import pdb; pdb.set_trace()
@@ -310,29 +313,38 @@ class MaskedLinear(nn.Linear):
     '''
     update: gradient based
     '''
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None, sparsity = 0.95):
+        super().__init__(in_features, out_features, bias, device, dtype)
         self.scores = nn.Parameter(torch.Tensor(self.weight.size()),requires_grad=True, )
         self.train_weights = False
         if self.train_weights == False:
             self.weight.requires_grad_(False)
-        self.score_init_constant = 0.50
+        
+        print(sparsity)
+        self.score_init_constant = sparsity
         # it is important to set to half precision
         self.scores.data = (
             # torch.ones_like(self.scores).half() * self.score_init_constant
             torch.ones_like(self.scores) * self.score_init_constant
         )
+        print(self.scores)
 
     @property
     def clamped_scores(self):
         return self.scores
 
     def forward(self, x):
-        if True:
+        if self.training:
+        # if True:
+        #     # logger.info("eval mode")
+        #     w = (self.weight > self.score_init_constant).float()
+        #     w = self.weight * w
+        #     x = F.linear(x, w, self.bias)
+        # else:
+            # logger.info("train mode")
             # keep scores > 0 
             self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
             # self.subnet = StraightThroughBinomialSampleNoGrad.apply(self.scores)
-            
             # self.subnet = _Binarizer3.apply(self.scores)
 
             # w = self.weight * self.subnet
@@ -343,8 +355,21 @@ class MaskedLinear(nn.Linear):
                 x = linear.apply(x, self.weight, self.bias, self.scores)
             except:
                 import pdb; pdb.set_trace()
+
+            # logger.info("train mode")
+
         else:
-            w = self.weight * self.subnet
+            
+
+            # w = self.weight * self.subnet
+            # w = (self.weight > self.score_init_constant).float()
+            # w = self.weight * w
+
+            # self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+
+            self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+            w = self.weight * torch.bernoulli(self.scores)
+
             # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
             x = F.linear(x, w, self.bias)
 
@@ -415,6 +440,7 @@ class OurTrainer(Trainer):
 
         print("################################################################")
         print(self.args.mask_only_mode)
+        print(self.args.sparsity)
         ## VRPGE
         mask_mode = True
         # VRPGE_mode=False
@@ -430,16 +456,19 @@ class OurTrainer(Trainer):
                     # if "attention" in n or "output" in n:
                     # if "attention" in n:
                     # if n.endswith("attention.output.dense"):
-                    if n.endswith("out_proj") or n.endswith("k_proj") or n.endswith("v_proj") or n.endswith("fc1") or n.endswith("fc2"):
+                    # if n.endswith("out_proj") or n.endswith("k_proj") or n.endswith("v_proj") or n.endswith("fc1") or n.endswith("fc2"):
+                    # if True:
+                    if not n.endswith("head"):
                     # if n.endswith("v_proj"):
                         print("replacing {}".format(n))
                         # new_module = LinearSparse(m.in_features, m.out_features).to(self.model.device)
                         # new_module = IA3Layer(m.in_features, m.out_features).to(self.model.device)
                         # new_module = VRPGELinear(m.in_features, m.out_features).to(self.model.device)
-                        new_module = MaskedLinear(m.in_features, m.out_features).to(self.model.device)
+                        new_module = MaskedLinear(m.in_features, m.out_features, sparsity=self.args.sparsity).to(self.model.device)
                         # Copy the weights and biases
                         new_module.weight.data = m.weight.data.clone()
-                        new_module.bias.data = m.bias.data.clone()
+                        if m.bias is not None:
+                            new_module.bias.data = m.bias.data.clone()
                         # Replace the module
                         name_parts = n.split('.')
                         parent = model
@@ -447,8 +476,11 @@ class OurTrainer(Trainer):
                             parent = getattr(parent, part)
                         setattr(parent, name_parts[-1], new_module)
 
+            # import pdb; pdb.set_trace()
             for name, param in model.named_parameters():
-                if not "scores" in name:
+                # if not "scores" in name:
+                # if True:
+                if "proj" in name or "fc" in name or "layer_norm" in name:
                     # param.requires_grad_(False)
                     pass
 
@@ -711,7 +743,19 @@ class OurTrainer(Trainer):
                     # AT THE VERY END!
                     _ = list(train_dataloader.sampler)
 
+        # fish: add memory tracker
+        self._memory_tracker = TrainerMemoryTracker(self.args.skip_memory_metrics)
+        self._memory_tracker.start()
+
         for epoch in range(epochs_trained, num_train_epochs):
+
+            # fish: add this to control eval
+            # print("epoch start")
+            model.train()
+            # print("epoch start, model.train is", self.model.training)
+            if not self.model.training:
+                import pdb; pdb.set_trace()
+            
             if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
                 train_dataloader.sampler.set_epoch(epoch)
             elif hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDatasetShard):
@@ -739,6 +783,11 @@ class OurTrainer(Trainer):
 
             step = -1
             for step, inputs in enumerate(epoch_iterator):
+
+                # model.train()
+                # print("epoch start, model.train is", self.model.training)
+                if not self.model.training:
+                    import pdb; pdb.set_trace()
 
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
@@ -768,6 +817,12 @@ class OurTrainer(Trainer):
                         with model.no_sync():
                             tr_loss_step = self.training_step(model, inputs)
                     else:
+
+                        # model.train()
+                        # print("epoch start, model.train is", self.model.training)
+                        if not self.model.training:
+                            import pdb; pdb.set_trace()
+
                         tr_loss_step = self.training_step(model, inputs)
 
                 if (
@@ -905,9 +960,12 @@ class OurTrainer(Trainer):
         self.store_flos()
         metrics["total_flos"] = self.state.total_flos
         metrics["train_loss"] = train_loss
+        
+        
 
         self.is_in_train = False
 
+        # seems no use
         self._memory_tracker.stop_and_update_metrics(metrics)
 
         self.log(metrics)
@@ -925,7 +983,8 @@ class OurTrainer(Trainer):
         self.control = self.callback_handler.on_train_end(args, self.state, self.control)
 
         if mask_only_mode:
-            import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()
+            print(model.model.decoder.layers[0].self_attn.k_proj.scores)
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
 
