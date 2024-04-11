@@ -342,8 +342,8 @@ class MaskedLinear(nn.Linear):
         return self.scores
 
     def forward(self, x):
-        if self.training:
-        # if True:
+        # if self.training:
+        if True:
         #     # logger.info("eval mode")
         #     w = (self.weight > self.score_init_constant).float()
         #     w = self.weight * w
@@ -408,8 +408,8 @@ class MaskedLinearS(nn.Linear):
         return self.scores
 
     def forward(self, x):
-        if self.training:
-        # if True:
+        # if self.training:
+        if True:
         #     # logger.info("eval mode")
         #     w = (self.weight > self.score_init_constant).float()
         #     w = self.weight * w
