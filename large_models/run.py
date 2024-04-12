@@ -138,8 +138,8 @@ class Framework:
         """
         with count_time("Loading model with FP%d" % (16 if self.args.load_float16 else 32)):
             free_in_GB = int(torch.cuda.mem_get_info()[0]/1024**3)
-            # config = AutoConfig.from_pretrained(self.args.model_name, )
-            config = AutoConfig.from_pretrained("./config")
+            config = AutoConfig.from_pretrained(self.args.model_name, )
+            #config = AutoConfig.from_pretrained("./config")
             # config.save_pretrained("./config")
             if self.args.untie_emb:
                 # Untie embeddings/LM head
@@ -173,7 +173,7 @@ class Framework:
                     max_memory={i: f'{free_in_GB-5}GB' for i in range(torch.cuda.device_count())},
                     load_in_8bit=self.args.load_int8,
                     # fish: add for offload
-                    offload_folder = './offload',
+                    # offload_folder = './offload',
 
                 )
             model.eval()

@@ -275,8 +275,9 @@ class linear(torch.autograd.Function):
 
         if ctx.needs_input_grad[0]:
             grad_input = grad_output.matmul(weight.to(dtype=grad_output.dtype))
-        else:
-            import pdb; pdb.set_trace()
+        # else:
+            # the first layer
+            # import pdb; pdb.set_trace()
 
         if ctx.needs_input_grad[1]:
 
@@ -558,14 +559,16 @@ class OurTrainer(Trainer):
 
             # import pdb; pdb.set_trace()
             for name, param in model.named_parameters():
-                if not "lm" in name and not "embedding"  in name:
-                # if not "score" in name:
+                # if (not "lm" in name) and (not "embedding" in name) and (not "scores"  in name):
+                # if not "lm" in name:
+                if not "score" in name:
                 # if not "embedding" in name:
                 # if True:
                 # if "proj" in name or "fc" in name or "layer_norm" in name:
                     param.requires_grad_(False)
                     # pass
 
+            print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     print(name)
