@@ -138,9 +138,15 @@ class Framework:
         """
         with count_time("Loading model with FP%d" % (16 if self.args.load_float16 else 32)):
             free_in_GB = int(torch.cuda.mem_get_info()[0]/1024**3)
-            config = AutoConfig.from_pretrained(self.args.model_name, )
-            #config = AutoConfig.from_pretrained("./config")
-            # config.save_pretrained("./config")
+            # try:
+                # config = AutoConfig.from_pretrained("./"+self.args.model_name)
+                # False
+            try:
+                # config = AutoConfig.from_pretrained(self.args.model_name, )
+                config = AutoConfig.from_pretrained("./config/"+self.args.model_name)
+            except:
+                config = AutoConfig.from_pretrained(self.args.model_name, )
+                config.save_pretrained("./config/"+self.args.model_name)
             if self.args.untie_emb:
                 # Untie embeddings/LM head
                 logger.warn("Untie embeddings and LM head")
@@ -174,12 +180,13 @@ class Framework:
                     load_in_8bit=self.args.load_int8,
                     # fish: add for offload
                     # offload_folder = './offload',
+                    local_files_only=True
 
                 )
             model.eval()
 
         # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(self.args.model_name, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(self.args.model_name, use_fast=False, local_files_only=True)
 
         # HF tokenizer bug fix
         if "opt" in self.args.model_name:
