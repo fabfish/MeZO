@@ -462,8 +462,65 @@ def get_n_m_sparse_matrix(w, N=2, M=4):
     index = torch.argsort(w_tmp, dim=1)[:, :int(M - N)]
     mask = torch.ones(w_tmp.shape, device=w_tmp.device)
     mask = mask.scatter_(dim=1, index=index, value=0).reshape(w.t().shape).t()
-    return w * mask, mask
+    return w * mask, mask.bool()
 
+def generate_sparsity_mask(tensor, sparsity):
+    """
+    Generate a binary mask tensor by sorting tensor elements and masking out the smallest ones
+    based on the given sparsity, and move it to the specified device.
+    
+    Parameters:
+        tensor (torch.Tensor): The input tensor.
+        sparsity (float): The sparsity level (between 0 and 1), where 1 means all zeros.
+        device (str): The device identifier where the mask will be placed (default 'cuda:0').
+
+    Returns:
+        torch.Tensor: A binary mask tensor with the same shape as the input tensor, on the specified device.
+    """
+    # 确保稀疏度在有效范围内
+    if not (0 <= sparsity <= 1):
+        raise ValueError("Sparsity must be between 0 and 1.")
+    
+    # 检查设备是否可用
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available on this system.")
+    
+    # 确定保留元素的数量
+    num_elements = tensor.numel()
+    num_to_retain = int((1 - sparsity) * num_elements)
+    
+    # 排序元素并生成掩码
+    _, indices = torch.sort(torch.abs(tensor.view(-1)), descending=True)
+    mask_indices = indices[:num_to_retain]  # 只保留绝对值最大的元素索引
+    mask = torch.zeros(num_elements, device=tensor.device)
+    mask[mask_indices] = 1
+    mask = mask.reshape(tensor.shape)
+
+    return mask.float() * tensor, mask.bool()
+
+class NMlinearfunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, weight, bias, mask):
+        ctx.save_for_backward(input, weight, bias, mask)
+        return F.linear(input, mask * weight, bias)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, weight, bias, mask = ctx.saved_tensors
+        grad_input = grad_weight = grad_bias = grad_mask = None
+        if ctx.needs_input_grad[0]:
+            # grad_input = grad_output.matmul(weight.t())
+            grad_input = grad_output.matmul((mask*weight).t())
+        if ctx.needs_input_grad[1]:
+            grad_weight = mask * (grad_output.t().matmul(input))
+        if bias is not None and ctx.needs_input_grad[2]:
+            grad_bias = grad_output.sum(0)
+        if ctx.needs_input_grad[3]:
+            import pdb; pdb.set_trace()
+            grad_mask = grad_output.t().matmul(input)
+        return grad_input, grad_weight, grad_bias, grad_mask
+    
+from torch.sparse import to_sparse_semi_structured
 class NMLinear(nn.Linear):
     # n=2 m=4 
     def __init__(self, *args, **kwargs):
@@ -476,11 +533,20 @@ class NMLinear(nn.Linear):
     def forward(self, x):
         # if self.training:
         if True:
-            w, m = get_n_m_sparse_matrix(self.weight)
+            # _, m = get_n_m_sparse_matrix(self.weight)
+            _, m = get_n_m_sparse_matrix(self.weight)
+            # w device is cuda
+            # w = nn.Parameter(to_sparse_semi_structured(self.weight.masked_fill(~m, 0)))
+            # took 50% more time
+            w, m = generate_sparsity_mask(self.weight, self.score_init_constant)
             w = w.to(x.dtype)
+            # import pdb; pdb.set_trace()
             self.bias = self.bias.to(x.dtype)
+            # m = m.to(x.dtype)
             # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
             x = F.linear(x, w, self.bias)
+            # no need
+            # x = NMlinearfunction.apply(x, w, self.bias, m)
         else:
             w = self.weight * self.subnet
             w = w.to(x.dtype)
@@ -546,7 +612,7 @@ class VRPGEMaskedLinear(nn.Linear):
 class VRPGELinear(nn.Linear):
     def __init__(self, sparsity = 0.95, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # self.scores = nn.Parameter(torch.Tensor(self.weight.size()))
+        self.scores = nn.Parameter(torch.Tensor(self.weight.size()))
         # self.register_buffer('subnet', torch.zeros_like(self.scores))
         # self.train_weights = True
         # if self.train_weights == False:
@@ -956,6 +1022,8 @@ class OurTrainer(Trainer):
                 self._load_rng_state(resume_from_checkpoint)
 
             step = -1
+            self.q = 5
+            self.saved_model = self.model
             for step, inputs in enumerate(epoch_iterator):
 
                 # model.train()
@@ -981,7 +1049,20 @@ class OurTrainer(Trainer):
 
                 # MeZO added: estimate gradient
                 if args.trainer == "zo":
-                    tr_loss_step = self.zo_step(model, inputs)
+                    # tr_loss_step = self.zo_step(model, inputs)
+
+                    # use svrg
+                    self.named_parameters_to_optim = []
+                    for name, param in model.named_parameters():
+                        if param.requires_grad:
+                            self.named_parameters_to_optim.append((name, param))
+                    if step % self.q == 0:
+                        self.saved_model = self.model
+                        tr_loss_step = self.svrg_step(model, inputs, 1)
+                    else:
+                        tr_loss_step = self.svrg_step(model, inputs, 0)
+                        # self.zo_step(self.saved_model, inputs)
+
                 else:
                     if (
                         ((step + 1) % args.gradient_accumulation_steps != 0)
@@ -1024,7 +1105,21 @@ class OurTrainer(Trainer):
                     # MeZO added: update model with the estimated gradient
                     if args.trainer == "zo":
                         # self.zo_update(model)
-                        self.zo_vrpge_update(model)
+                        # self.zo_vrpge_update(model)
+
+                        # use svrg
+
+                        self.svrg_update(model)
+
+                        if step % self.q != 0:
+                            self.named_parameters_to_optim = []
+                            for name, param in model.named_parameters():
+                                if param.requires_grad:
+                                    self.named_parameters_to_optim.append((name, param))
+                            self.saved_parameters = self.named_parameters_to_optim
+                            self.svrg_step(self.saved_model, inputs, 0)
+                            self.named_parameters_to_optim = self.saved_parameters
+                            self.svrg_update(model, 0)
                     else:
                         # Gradient clipping
                         if args.max_grad_norm is not None and args.max_grad_norm > 0 and not self.deepspeed:
@@ -1280,6 +1375,42 @@ class OurTrainer(Trainer):
         self.zo_perturb_parameters(scaling_factor=1)
         
         return loss1
+    
+    def svrg_step(self, model, inputs, flag):
+        """
+        Estimate gradient by MeZO. Return the loss from f(theta + z)
+        """
+        args = self.args
+
+        # Perturb running theta model
+
+        # What parameters to optimize 
+
+        # Sample the random seed for sampling z
+        self.zo_random_seed = np.random.randint(1000000000)
+
+
+        # First function evaluation
+        self.zo_perturb_parameters(scaling_factor=1)
+        loss1 = self.zo_forward(model, inputs)
+
+        # Second function evaluation
+        self.zo_perturb_parameters(scaling_factor=-2)
+        loss2 = self.zo_forward(model, inputs)
+
+        self.projected_grad = ((loss1 - loss2) / (2 * self.args.zo_eps)).item()
+
+        if flag == 1:
+            self.saved_grad = self.projected_grad
+
+        # No gradient accumulation support
+        assert self.args.gradient_accumulation_steps == 1
+
+        # Reset model back to its parameters at start of step
+        self.zo_perturb_parameters(scaling_factor=1)
+        
+        return loss1
+
 
 
     def zo_update(self, model):
@@ -1304,6 +1435,28 @@ class OurTrainer(Trainer):
                 param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
             else:
                 param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
+
+        self.lr_scheduler.step()
+
+    def svrg_update(self, model, flag = 1):
+        """
+        Update the parameters with the estimated gradients.
+        """
+        args = self.args
+
+        # Reset the random seed for sampling zs
+        torch.manual_seed(self.zo_random_seed)     
+
+        for name, param in self.named_parameters_to_optim:
+            # Resample z
+            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            if "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
+                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
+            else:
+                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
+
+            if flag == 0:
+                param.data = param.data - self._get_learning_rate() * (self.saved_grad * z + args.weight_decay * param.data)
 
         self.lr_scheduler.step()
 
@@ -1337,42 +1490,7 @@ class OurTrainer(Trainer):
         for n, m in model.named_modules():
             if hasattr(m, "scores"):
                 # import pdb; pdb.set_trace()
-                m.scores.data = m.scores.data - 5000 * self._get_learning_rate() * ( 1/(args.K-1)*(self.fn_list[0] - self.fn_avg)*getattr(m, 'stored_mask_0') + 1/(args.K-1)*(self.fn_list[1] - self.fn_avg)*getattr(m, 'stored_mask_1'))
-                # pass
-
-        self.lr_scheduler.step()
-
-    def vrpge_update(self, model):
-        """
-        Update the parameters with the estimated gradients.
-        """
-        args = self.args
-        args.K = 2
-
-        # Reset the random seed for sampling zs
-        torch.manual_seed(self.zo_random_seed)     
-
-        for name, param in self.named_parameters_to_optim:
-            # Resample z
-            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
-            # if "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
-            #     param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
-            # else:
-            #     param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
-            if "scores" in name:
-                pass
-            # if False:
-                # param.data = param.data - 10 * self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
-                # param.data = param.data - 10 * 1/(args.K-1)*(self.fn_list[0] - self.fn_avg)*getattr(m, 'stored_mask_0') + 1/(args.K-1)*(self.fn_list[1] - self.fn_avg)*getattr(m, 'stored_mask_1')
-            elif "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
-                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
-            else:
-                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
-
-        for n, m in model.named_modules():
-            if hasattr(m, "scores"):
-                # import pdb; pdb.set_trace()
-                m.scores.data = m.scores.data - 5000 * self._get_learning_rate() * ( 1/(args.K-1)*(self.fn_list[0] - self.fn_avg)*getattr(m, 'stored_mask_0') + 1/(args.K-1)*(self.fn_list[1] - self.fn_avg)*getattr(m, 'stored_mask_1'))
+                m.scores.data = m.scores.data - 50000 * self._get_learning_rate() * ( 1/(args.K-1)*(self.fn_list[0] - self.fn_avg)*getattr(m, 'stored_mask_0') + 1/(args.K-1)*(self.fn_list[1] - self.fn_avg)*getattr(m, 'stored_mask_1'))
                 # pass
 
         self.lr_scheduler.step()
