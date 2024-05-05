@@ -170,6 +170,10 @@ from transformers.utils import (
     logging,
 )
 from transformers.utils.generic import ContextManagers
+# taken from hizoo
+from lr_scheduler import zo_lr_scheduler
+from Hessian_smooth_scheduler import Hessian_smooth_scheduler
+
 
 
 _is_native_cpu_amp_available = is_torch_greater_or_equal_than_1_10
@@ -995,6 +999,9 @@ class OurTrainer(Trainer):
             # print("epoch start, model.train is", self.model.training)
             if not self.model.training:
                 import pdb; pdb.set_trace()
+
+            zo_learning_rate = zo_lr_scheduler(self.args.learning_rate, self.args.zo_lr_scheduler_type, self.args.warmup_step, self.args.decay_step, self.state.global_step, int(num_train_epochs))
+            Hessian_smooth = Hessian_smooth_scheduler(self.args.hessian_smooth_type, self.state.global_step, int(num_train_epochs))
             
             if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
                 train_dataloader.sampler.set_epoch(epoch)
@@ -1049,11 +1056,12 @@ class OurTrainer(Trainer):
 
                 # use_svrg = True
                 use_svrg = False
+                use_hizoo = True
                 # MeZO added: estimate gradient
                 if args.trainer == "zo":
                     if not use_svrg:
                         tr_loss_step = self.zo_step(model, inputs)
-                    else:
+                    elif use_svrg:
                     # use svrg
                         self.named_parameters_to_optim = []
                         for name, param in model.named_parameters():
@@ -1065,6 +1073,8 @@ class OurTrainer(Trainer):
                         else:
                             tr_loss_step = self.svrg_step(model, inputs, 0)
                             # self.zo_step(self.saved_model, inputs)
+                    elif use_hizoo:
+                        tr_loss_step = self.zo_Hessian_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
 
                 else:
                     if (
@@ -1110,8 +1120,7 @@ class OurTrainer(Trainer):
                         if not use_svrg:
                             self.zo_update(model)
                             # self.zo_vrpge_update(model)
-                        else:
-                        # use svrg
+                        elif use_svrg:
 
                             self.svrg_update(model)
 
@@ -1124,6 +1133,7 @@ class OurTrainer(Trainer):
                                 self.svrg_step(self.saved_model, inputs, 0)
                                 self.named_parameters_to_optim = self.saved_parameters
                                 self.svrg_update(model, 0)
+
                     else:
                         # Gradient clipping
                         if args.max_grad_norm is not None and args.max_grad_norm > 0 and not self.deepspeed:
@@ -1277,7 +1287,50 @@ class OurTrainer(Trainer):
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
 
+    def efficient_Hessian_perturb_parameters(self, model: nn.Module, random_seed, Hessian_matrix=None, scaling_factor=1):
+        torch.manual_seed(random_seed)
+        for name, param in self.named_parameters_to_optim:
+            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            param.data = param.data + scaling_factor * torch.sqrt(Hessian_matrix[name]) * z * self.args.zo_eps
+        return model
+        
+    def zo_Hessian_step_update(self, model, inputs, zo_learning_rate, Hessian_smooth):
+    
+        self.named_parameters_to_optim = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.named_parameters_to_optim.append((name, param))
 
+        random_seed = np.random.randint(1000000000)
+        with torch.no_grad():
+            loss_original = self.zo_forward(model, inputs)
+
+            # first function evaluation
+            model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
+            loss1 = self.zo_forward(model, inputs)
+
+
+            # second function evaluation
+            model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=-2)
+            loss2 = self.zo_forward(model, inputs)
+                     
+
+            model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
+            
+            torch.manual_seed(random_seed)
+            for name, param in self.named_parameters_to_optim:
+                z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+
+                Hessian_temp = (1/self.Hessian_matrix[name] * z * z)
+                Hessian_estimator = (torch.abs(loss1+loss2-2 * loss_original)* Hessian_temp  /(2 * self.args.zo_eps*self.args.zo_eps))
+                
+                self.Hessian_matrix[name] = ((1-Hessian_smooth) * self.Hessian_matrix[name] +  Hessian_smooth * Hessian_estimator)
+
+                grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z * torch.sqrt(self.Hessian_matrix[name]))
+                param.data = param.data - zo_learning_rate * (grad + self.args.weight_decay * param.data)
+
+            loss_out = self.zo_forward(model, inputs)
+        return loss_out
 
     ############## MeZO ##############
 
