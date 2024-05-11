@@ -15,6 +15,11 @@ STEPS=${STEPS:-20000}
 EVAL_STEPS=${EVAL_STEPS:-4000}
 SPARSITY=${SPARSITY:-0.95}
 
+WARMUP_STEP=${WARMUP_STEP:-0}
+DECAY_STEP=${DECAY_STEP:-0}
+ZO_LR_SCHEDULER_TYPE=${ZO_LR_SCHEDULER_TYPE:-'constant'}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0}
+HESSIAN_SMOOTH_TYPE=${HESSIAN_SMOOTH_TYPE:-'constant1e-6'}
 
 
 MODE=${MODE:-ft}
@@ -67,6 +72,9 @@ python run.py \
     --eval_steps $EVAL_STEPS --save_steps $EVAL_STEPS \
     --train_as_classification \
     --sparsity $SPARSITY \
+    --warmup_step $WARMUP_STEP --decay_step $DECAY_STEP  --zo_lr_scheduler_type $ZO_LR_SCHEDULER_TYPE \
+    --weight_decay $WEIGHT_DECAY --hessian_smooth_type $HESSIAN_SMOOTH_TYPE \
+    --overwrite_output_dir \
     $EXTRA_ARGS \
     $TASK_ARGS \
     $MASK_ONLY \

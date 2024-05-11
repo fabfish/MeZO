@@ -22,6 +22,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataP
 from metrics import calculate_metric
 from utils import *
 from trainer import OurTrainer
+# from hizootrainer import OurTrainer
 import random
 
 @dataclass
@@ -106,6 +107,13 @@ class OurArguments(TrainingArguments):
     # mask only
     mask_only_mode: bool = False # only mask the input and predict the masked token
     sparsity: float = 0.95
+
+    ###############diag
+    warmup_step: int = 0
+    decay_step: int = 0
+    zo_lr_scheduler_type: str = 'constant'
+    weight_decay: float = 0
+    hessian_smooth_type: str = 'constant0'
 
 
 

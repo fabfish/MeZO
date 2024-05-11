@@ -155,6 +155,7 @@ def get_constant2_schedule(current_step, num_training_steps):
 
 def get_constant0_schedule(current_step, num_training_steps):
 
+    # return 0
     return 0
 
 def get_constant_schedule_with_warmup(current_step, num_training_steps):

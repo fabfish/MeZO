@@ -22,6 +22,23 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Un
 import copy
 from metrics import f1
 import numpy as np
+import torch.nn.functional as F
+
+VRPGE_mode = False
+# mask_only_mode = True
+
+# import os
+# fish: add for proxy
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['HTTP_PROXY'] = "http://127.0.0.1:7897"
+os.environ['HTTPS_PROXY'] = "http://127.0.0.1:7897"
+os.environ['ALL_PROXY'] = "socks5://127.0.0.1:7897"
+mask_only_mode = True
+if mask_only_mode:
+    os.environ["WANDB_PROJECT"] = "Masked-only-" 
+
+os.environ['HF_DATASETS_OFFLINE ']= "1"
+
 from tqdm.auto import tqdm
 from transformers import Trainer
 from sklearn.linear_model import LinearRegression, LogisticRegression, LogisticRegressionCV
@@ -158,6 +175,8 @@ if is_apex_available():
     from apex import amp
 
 if is_datasets_available():
+    # 
+    os.environ['HF_DATASETS_OFFLINE '] = "1"
     import datasets
 
 if is_torch_tpu_available(check_device=False):
@@ -474,6 +493,9 @@ class OurTrainer(Trainer):
         for name, param in model.named_parameters():
             if param.requires_grad:
                 self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+
+        # debug 发现 self.Hessian_matrix['model.decoder.embed_tokens.weight'] 全为nan，其他正常, or loss_out = nan
+        
         for epoch in range(epochs_trained, num_train_epochs):
             
 
@@ -664,9 +686,14 @@ class OurTrainer(Trainer):
                      
 
             model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
+            # test
+            saved_model = model.copy()
+            loss3 = self.zo_forward(model, inputs)
             
             torch.manual_seed(random_seed)
             for name, param in self.named_parameters_to_optim:
+                # if name == 'model.decoder.embed_tokens.weight':
+                    # pass
                 z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
 
                 Hessian_temp = (1/self.Hessian_matrix[name] * z * z)
@@ -677,7 +704,20 @@ class OurTrainer(Trainer):
                 grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z * torch.sqrt(self.Hessian_matrix[name]))
                 param.data = param.data - zo_learning_rate * (grad + self.args.weight_decay * param.data)
 
+                pisn = param.data.isnan().any()
+                gisn = grad.isnan().any()
+                heisn = Hessian_estimator.isnan().any()
+                htisn = Hessian_temp.isnan().any()
+                hmisn = self.Hessian_matrix[name].isnan().any()
+                if pisn or gisn or heisn or htisn or hmisn:
+                # if param.data.isnan().any() or grad.isnan().any() or Hessian_estimator.isnan().any() or Hessian_temp.isnan().any() or self.Hessian_matrix[name].isnan().any():
+                    print(pisn, gisn, heisn, htisn, hmisn)
+                    import pdb; pdb.set_trace()
+
             loss_out = self.zo_forward(model, inputs)
+            if loss_out.isnan():
+                import pdb; pdb.set_trace()
+        
         return loss_out
 
 
