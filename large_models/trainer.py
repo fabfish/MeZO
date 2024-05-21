@@ -47,8 +47,8 @@ os.environ['HTTP_PROXY'] = "http://127.0.0.1:7897"
 os.environ['HTTPS_PROXY'] = "http://127.0.0.1:7897"
 os.environ['ALL_PROXY'] = "socks5://127.0.0.1:7897"
 mask_only_mode = True
-if mask_only_mode:
-    os.environ["WANDB_PROJECT"] = "Masked-only-" 
+# if mask_only_mode:
+os.environ["WANDB_PROJECT"] = "HiZOO" 
 
 os.environ['HF_DATASETS_OFFLINE ']= "1"
 
@@ -1086,8 +1086,9 @@ class OurTrainer(Trainer):
                             # self.zo_step(self.saved_model, inputs)
                     elif use_hizoo:
                         # print(1)
-                        tr_loss_step = self.zo_Hessian_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
+                        # tr_loss_step = self.zo_Hessian_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
                         # tr_loss_step = self.myH(model, inputs, zo_learning_rate, Hessian_smooth)
+                        tr_loss_step = self.my_hizoo_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
 
                 else:
                     if (
@@ -1296,7 +1297,7 @@ class OurTrainer(Trainer):
                 print(name)
                 print(param.shape)
                 print(param.sum())
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
 
@@ -1373,6 +1374,154 @@ class OurTrainer(Trainer):
 
         return loss_out
     
+    def my_hizoo_perturb_parameters(self, model: nn.Module, random_seed, Hessian_matrix=None, scaling_factor=1, myhizoo_layers = None):
+        torch.manual_seed(random_seed)
+        for name, param in self.named_parameters_to_optim:
+            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            is_myhizoo_layer = False
+            for myhizoo_layer in myhizoo_layers:
+                if myhizoo_layer in name:
+                    # param.data = param.data + scaling_factor * torch.sqrt(Hessian_matrix[name]) * z * self.args.zo_eps
+                    is_myhizoo_layer = True
+                    # import pdb; pdb.set_trace()
+                # else:
+                    # param.data = param.data + scaling_factor * z * self.args.zo_eps
+            if not "layers" in name:
+                is_myhizoo_layer = True
+            if is_myhizoo_layer:
+                param.data = param.data + scaling_factor * torch.sqrt(Hessian_matrix[name]) * z * self.args.zo_eps
+                # print("update {} with hizoo".format(name))
+            else:
+                param.data = param.data + scaling_factor * z * self.args.zo_eps
+                # print("update {} with mezo".format(name))
+
+        return model
+
+    def my_hizoo_step_update(self, model, inputs, zo_learning_rate, Hessian_smooth):
+    
+        # import pdb; pdb.set_trace()
+        # if self.Hessian_matrix is None, this will be the initialization
+        if not hasattr(self, 'Hessian_matrix'):
+            # self.zo_random_seed = np.random.randint(1000000000)
+            self.Hessian_matrix = {}
+            self.layer_numbers = []
+            for name, param in model.named_parameters():
+                # detect if the param is of a specific layer. if true, record the layer numbers to identify the model structure.
+                if "layers" in name:
+                    # normally the layer number is the digit after the word "layer" and a point, so search layer. and a digit
+                    layer_num = re.search(r'layers.\d.', name).group(0)
+                    # maintain a list of layer numbers
+                    if layer_num not in self.layer_numbers:
+                        self.layer_numbers.append(layer_num)
+                # if param.requires_grad:
+                    # self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            # initialize a step count for hizoo layers
+            self.myhizoo_max = 800
+            self.myhizoo_step = 0 # count from 10 to 0
+            self.select_layer_num = 1
+
+        # after initialization, first we try the badam way of coordinate iterative optimization
+        # each myhizoo turn, we do myhizoo_max steps of hybrid mezo and hizoo
+        # with hizoo on the chosen layer (iteratively)
+        self.myhizoo_step -=1
+        if self.myhizoo_step < 0:
+            # if we finish the myhizoo_max steps, we reset the step count and choose the next layer
+            self.myhizoo_step = self.myhizoo_max
+            # choose the next layer
+            self.myhizoo_layer = []
+            for i in range(self.select_layer_num):
+                # self.myhizoo_layer = self.layer_numbers.pop(0)
+                selected_layer = self.layer_numbers.pop(0)
+                # put the layer number back to the end of the list
+                self.layer_numbers.append(selected_layer)
+                # print the layer number
+                # print(self.myhizoo_layer)
+                # self.myhizoo_layer = "layer." + self.myhizoo_layer
+                self.myhizoo_layer.append(selected_layer)
+
+            # print(self.myhizoo_layer)
+            for name, param in model.named_parameters():
+                for myhizoo_layer in self.myhizoo_layer:
+                    if myhizoo_layer in name:
+                        if param.requires_grad:
+                            self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+                if not "layers" in name:
+                    if param.requires_grad:
+                        self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+
+
+        self.named_parameters_to_optim = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.named_parameters_to_optim.append((name, param))
+
+        random_seed = np.random.randint(1000000000)
+        with torch.no_grad():
+            loss_original = self.zo_forward(model, inputs)
+
+            # first function evaluation
+            # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
+            model = self.my_hizoo_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1, myhizoo_layers=self.myhizoo_layer)
+            loss1 = self.zo_forward(model, inputs)
+
+
+            # second function evaluation
+            # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=-2)
+            model = self.my_hizoo_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=-2, myhizoo_layers=self.myhizoo_layer)
+            loss2 = self.zo_forward(model, inputs)
+
+            # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
+            model = self.my_hizoo_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1, myhizoo_layers=self.myhizoo_layer)
+            # self.saved_model = copy.deepcopy(model)
+            
+            torch.manual_seed(random_seed)
+            for name, param in self.named_parameters_to_optim:
+                z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+
+                # if self.myhizoo_layer in name:
+                is_hizoo_layer = False
+                for myhizoo_layer in self.myhizoo_layer:
+                    if myhizoo_layer in name:
+                        is_hizoo_layer = True
+                    if not "layers" in name:
+                        is_hizoo_layer = True
+                if is_hizoo_layer:
+                    Hessian_temp = (1/self.Hessian_matrix[name] * z * z)
+                    Hessian_estimator = (torch.abs(loss1+loss2-2 * loss_original)* Hessian_temp  /(2 * self.args.zo_eps*self.args.zo_eps))
+                    # 设置上限值
+                    # 65504 exceeds the max value of float16
+                    max_float16 = 65504
+                    Hessian_estimator.clamp_(max=max_float16)
+
+                    # debuug code:
+                    # nan_indices = torch.where(torch.isnan(self.Hessian_matrix[name][0]))[0]
+                    # Hessian_estimator[0][nan_indices]
+                    
+                    # print(self.Hessian_matrix[name][0])
+
+                    self.Hessian_matrix[name] = ((1-Hessian_smooth) * self.Hessian_matrix[name] +  Hessian_smooth * Hessian_estimator)
+                    # print(self.Hessian_matrix[name])
+
+                    grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z * torch.sqrt(self.Hessian_matrix[name]))
+
+                else:
+                    grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z)
+                param.data = param.data - zo_learning_rate * (grad + self.args.weight_decay * param.data)
+
+                if param.data.isnan().any():
+                    import pdb; pdb.set_trace()
+                    # pass
+
+                if name == "model.decoder.layers.0.fc1.weight":
+                    # print(1)
+                    # import pdb; pdb.set_trace()
+                    pass
+
+                # import pdb; pdb.set_trace()
+            # loss_out = self.zo_forward(model, inputs)
+
+        return loss1
+
     def myH(self, model, inputs, zo_learning_rate, Hessian_smooth):
     
         # if self.Hessian_matrix is None:

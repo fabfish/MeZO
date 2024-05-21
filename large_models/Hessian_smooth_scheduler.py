@@ -128,14 +128,25 @@ def get_constant_decay1_schedule(current_step, num_training_steps):
     else:
         return 1e-8
 
+def get_constant5_schedule(current_step, num_training_steps):
+
+    return 1e-5
 
 def get_constant6_schedule(current_step, num_training_steps):
 
     return 1e-6
     
+def get_constant7_schedule(current_step, num_training_steps):
+
+    return 1e-7
+
 def get_constant8_schedule(current_step, num_training_steps):
 
     return 1e-8
+
+def get_constant9_schedule(current_step, num_training_steps):
+
+    return 1e-9
 
 def get_constant10_schedule(current_step, num_training_steps):
 
@@ -196,8 +207,11 @@ TYPE_TO_SCHEDULER_FUNCTION = {
     'constant_polynomial_decay_with_warmup' : get_constant_polynomial_decay_schedule_with_warmup,
     'polynomial_decay' : get_polynomial_decay_schedule,
     'constant0': get_constant0_schedule,
+    'constant1e-5': get_constant5_schedule,
     'constant1e-6': get_constant6_schedule,
+    'constant1e-7': get_constant7_schedule,
     'constant1e-8': get_constant8_schedule,
+    'constant1e-9': get_constant9_schedule,
     'constant1e-10': get_constant10_schedule,
     'constant1e-12': get_constant12_schedule,
     'constant1e-2': get_constant2_schedule,
