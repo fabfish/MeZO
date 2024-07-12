@@ -159,10 +159,25 @@ def get_constant12_schedule(current_step, num_training_steps):
 def get_constant4_schedule(current_step, num_training_steps):
 
     return 1e-4
-    
+
+def get_constant3_schedule(current_step, num_training_steps):
+
+    return 1e-3
+
 def get_constant2_schedule(current_step, num_training_steps):
 
     return 1e-2
+
+def get_constant1_schedule(current_step, num_training_steps):
+
+    # return 0
+    # return 0.2
+    return 0.1
+
+def get_constant1e1_schedule(current_step, num_training_steps):
+
+    # return 0
+    return 1
 
 def get_constant0_schedule(current_step, num_training_steps):
 
@@ -214,7 +229,10 @@ TYPE_TO_SCHEDULER_FUNCTION = {
     'constant1e-9': get_constant9_schedule,
     'constant1e-10': get_constant10_schedule,
     'constant1e-12': get_constant12_schedule,
+    'constant1e-1': get_constant1_schedule,
+    'constant1e1': get_constant1e1_schedule,
     'constant1e-2': get_constant2_schedule,
+    'constant1e-3': get_constant3_schedule,
     'constant1e-4': get_constant4_schedule,
     'constant_with_warmup': get_constant_schedule_with_warmup,
     'constant_decay1': get_constant_decay1_schedule,
@@ -225,3 +243,9 @@ def Hessian_smooth_scheduler(Hessian_smooth_type, current_step, num_training_ste
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[Hessian_smooth_type]
 
     return schedule_func(current_step, num_training_steps)
+
+def Hessian_smooth_scheduler_cosine(Hessian_smooth_type, current_step, num_training_steps):
+    schedule_func = TYPE_TO_SCHEDULER_FUNCTION[Hessian_smooth_type]
+    learning_rate = schedule_func(1, num_training_steps)
+
+    return get_cosine_schedule_with_warmup(learning_rate, None, num_training_steps // 20, None, current_step, num_training_steps)

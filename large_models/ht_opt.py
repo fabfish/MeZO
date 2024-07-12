@@ -953,20 +953,42 @@ class OPTForCausalLM(OPTPreTrainedModel):
                 return_dict=return_dict,
             )
 
+        # print(outputs)
+        # self.o = outputs
         logits = self.lm_head(outputs[0]).contiguous()
+        # logger.info(f"Logits shape: {logits.shape}")
+        # logging.info(f"Logits shape: {logits.shape}")
 
         loss = None
-        if labels is not None:
+        if labels is not None: # labels is none, why?
+            # print(1)
+            self.labels = labels
             # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
+            self.shift_logits = shift_logits
             shift_labels = labels[..., 1:].contiguous()
+            self.shift_labels = shift_labels
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
+            self.loss_fct = loss_fct
             loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
+            self.loss = loss
 
-        if not return_dict:
+        if not return_dict: # False
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
+        
+        self.logits = logits
+        # logits = logits.clamp(max = 65504, min = -65504)
+        self.outputs = outputs
+        # import pdb; pdb.set_trace()
+        self.o = CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
         return CausalLMOutputWithPast(
             loss=loss,

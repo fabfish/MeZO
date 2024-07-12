@@ -179,7 +179,9 @@ class Framework:
                     torch_dtype = torch.float16
                 elif self.args.load_bfloat16:
                     torch_dtype = torch.bfloat16
-                model = AutoModelForCausalLM.from_pretrained(
+                # model = AutoModelForCausalLM.from_pretrained(
+                from ht_opt import OPTForCausalLM
+                model = OPTForCausalLM.from_pretrained(
                     self.args.model_name,
                     config=config,
                     device_map='auto',
@@ -187,8 +189,8 @@ class Framework:
                     # max_memory={i: f'{free_in_GB-5}GB' for i in range(torch.cuda.device_count())},
                     load_in_8bit=self.args.load_int8,
                     # fish: add for offload
-                    # offload_folder = './offload',
-                    # local_files_only=True
+                    offload_folder = './offload',
+                    local_files_only=True
 
                 )
             model.eval()
@@ -466,6 +468,7 @@ class Framework:
         
         # Reset the forward function for evaluation
         if self.args.only_train_option and not self.args.non_diff:
+            # True
             if type(self.model) == FSDP:
                 logger.info("This is an FSDP model now. Be careful when assigning back the original forward function")
                 self.model._fsdp_wrapped_module.forward = self.model._fsdp_wrapped_module.original_forward
