@@ -179,9 +179,9 @@ class Framework:
                     torch_dtype = torch.float16
                 elif self.args.load_bfloat16:
                     torch_dtype = torch.bfloat16
-                # model = AutoModelForCausalLM.from_pretrained(
-                from ht_opt import OPTForCausalLM
-                model = OPTForCausalLM.from_pretrained(
+                model = AutoModelForCausalLM.from_pretrained(
+                # from ht_opt import OPTForCausalLM
+                # model = OPTForCausalLM.from_pretrained(
                     self.args.model_name,
                     config=config,
                     device_map='auto',
@@ -190,8 +190,8 @@ class Framework:
                     load_in_8bit=self.args.load_int8,
                     # fish: add for offload
                     offload_folder = './offload',
-                    local_files_only=True
-
+                    local_files_only=True,
+                    # from_tf=True
                 )
             model.eval()
 

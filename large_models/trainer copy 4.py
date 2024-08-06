@@ -1590,11 +1590,6 @@ class OurTrainer(Trainer):
             # choose the next layer
             self.myhizoo_layer = []
 
-
-            del self.Hessian_matrix
-            torch.cuda.empty_cache()
-            # self.zo_random_seed = np.random.randint(1000000000)
-            self.Hessian_matrix = {}
             # ordered = False
             ordered = True
             if ordered:
@@ -1722,7 +1717,38 @@ class OurTrainer(Trainer):
                     # grad = torch.Tensor([0.0]).to(param.device)
                     grad  = loss1-loss1
 
-
+                # update gsq info
+                # if self.current_step % 100 == 0:
+                #     if 'layers' in name:
+                #         layer_index = name.split('.')[3]
+                #         tmp = grad.abs() / 1e2
+                #         max_float16 = 65504
+                #         tmp.clamp_(max=max_float16)
+                #         tmp = torch.log(tmp + 1)
+                #         tmp = tmp.sum()
+                #         if layer_index in self.blocks:
+                #             # self.blocks[layer_index].append((name, grad.sum(), self.current_step))
+                #             if self.current_step in self.blocks[layer_index]:
+                #                 self.blocks[layer_index][self.current_step / 100].append((name, tmp))
+                #             else:
+                #                 self.blocks[layer_index][self.current_step / 100] = [(name, tmp)]
+                if self.current_step % 100 == 0:
+                    if 'layers' in name:
+                        layer_index = name.split('.')[3]
+                        # Convert gradient to float32 to avoid overflow issues
+                        grad_fp32 = grad.to(torch.float32)
+                        tmp = grad_fp32.abs() / 1e2
+                        max_float16 = 65504
+                        tmp.clamp_(max=max_float16, min=-max_float16)
+                        tmp = torch.log(tmp + 1)
+                        tmp = tmp.sum()
+                        if layer_index in self.blocks:
+                            # Using integer division to ensure the result is an integer for indexing
+                            step_index = self.current_step // 100
+                            if step_index in self.blocks[layer_index]:
+                                self.blocks[layer_index][step_index].append((name, tmp))
+                            else:
+                                self.blocks[layer_index][step_index] = [(name, tmp)]
                 if param.data.isnan().any():
                     import pdb; pdb.set_trace()
                     # pass

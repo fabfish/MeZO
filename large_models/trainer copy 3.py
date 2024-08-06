@@ -1570,7 +1570,7 @@ class OurTrainer(Trainer):
             self.select_layer_num = 2
 
         # support gsq update
-        if not hasattr(self, 'blocks'):
+        if not hasattr(self, 'blocks') and False:
             self.blocks = {}
             for name, param in self.model.named_parameters():
                 if param.requires_grad:
@@ -1579,6 +1579,8 @@ class OurTrainer(Trainer):
                         if layer_index not in self.blocks:
                             self.blocks[layer_index] = {}
                         # self.blocks[layer_index].append((name, param))
+
+        torch.cuda.empty_cache()
 
         # after initialization, first we try the badam way of coordinate iterative optimization
         # each myhizoo turn, we do myhizoo_max steps of hybrid mezo and hizoo
@@ -1590,11 +1592,20 @@ class OurTrainer(Trainer):
             # choose the next layer
             self.myhizoo_layer = []
 
-
             del self.Hessian_matrix
             torch.cuda.empty_cache()
             # self.zo_random_seed = np.random.randint(1000000000)
             self.Hessian_matrix = {}
+            self.layer_numbers = []
+            for name, param in model.named_parameters():
+                # detect if the param is of a specific layer. if true, record the layer numbers to identify the model structure.
+                if "layers" in name:
+                    # normally the layer number is the digit after the word "layer" and a point, so search layer. and a digit
+                    layer_num = re.search(r'layers.\d.', name).group(0)
+                    # maintain a list of layer numbers
+                    if layer_num not in self.layer_numbers:
+                        self.layer_numbers.append(layer_num)
+
             # ordered = False
             ordered = True
             if ordered:
@@ -1634,14 +1645,17 @@ class OurTrainer(Trainer):
                     selected_layer = "layers." + str(selected_layer)
                     self.myhizoo_layer.append(selected_layer)
 
+            torch.cuda.empty_cache()
             step_index = self.current_step // 100
             if not hasattr(self,"selected_layer_log"):
                 self.selected_layer_log = []
             # log selected and step
             self.selected_layer_log.append((selected_layer, step_index))
+            torch.cuda.empty_cache()
 
             # print(self.myhizoo_layer)
             for name, param in model.named_parameters():
+                
                 for myhizoo_layer in self.myhizoo_layer:
                     if myhizoo_layer in name:
                         if param.requires_grad:
@@ -1649,6 +1663,8 @@ class OurTrainer(Trainer):
                 if not "layers" in name:
                     if param.requires_grad:
                         self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+
+            torch.cuda.empty_cache()
 
 
         self.named_parameters_to_optim = []
@@ -1722,7 +1738,39 @@ class OurTrainer(Trainer):
                     # grad = torch.Tensor([0.0]).to(param.device)
                     grad  = loss1-loss1
 
-
+                # update gsq info
+                # if self.current_step % 100 == 0:
+                #     if 'layers' in name:
+                #         layer_index = name.split('.')[3]
+                #         tmp = grad.abs() / 1e2
+                #         max_float16 = 65504
+                #         tmp.clamp_(max=max_float16)
+                #         tmp = torch.log(tmp + 1)
+                #         tmp = tmp.sum()
+                #         if layer_index in self.blocks:
+                #             # self.blocks[layer_index].append((name, grad.sum(), self.current_step))
+                #             if self.current_step in self.blocks[layer_index]:
+                #                 self.blocks[layer_index][self.current_step / 100].append((name, tmp))
+                #             else:
+                #                 self.blocks[layer_index][self.current_step / 100] = [(name, tmp)]
+                if self.current_step % 100 == 0:
+                    if 'layers' in name:
+                        layer_index = name.split('.')[3]
+                        # Convert gradient to float32 to avoid overflow issues
+                        grad_fp32 = grad.to(torch.float32)
+                        tmp = grad_fp32.abs() / 1e2
+                        max_float16 = 65504
+                        tmp.clamp_(max=max_float16, min=-max_float16)
+                        tmp = torch.log(tmp + 1)
+                        tmp = tmp.sum()
+                        if hasattr(self,"blocks"):
+                            if layer_index in self.blocks and not ordered:
+                                # Using integer division to ensure the result is an integer for indexing
+                                step_index = self.current_step // 100
+                                if step_index in self.blocks[layer_index]:
+                                    self.blocks[layer_index][step_index].append((name, tmp))
+                                else:
+                                    self.blocks[layer_index][step_index] = [(name, tmp)]
                 if param.data.isnan().any():
                     import pdb; pdb.set_trace()
                     # pass
