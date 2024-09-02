@@ -23,6 +23,8 @@ HESSIAN_SMOOTH_TYPE=${HESSIAN_SMOOTH_TYPE:-'constant1e-8'}
 # HESSIAN_SMOOTH_TYPE=${HESSIAN_SMOOTH_TYPE:-'constant1e-1'}
 # HESSIAN_SMOOTH_TYPE=${HESSIAN_SMOOTH_TYPE:-'constant1e-8'} & 5e-7
 # best lisa-hizoo: 1e-1 (0.15)
+USE_HIZOO=${USE_HIZOO:-'--use_hizoo False'}
+USE_LISA=${USE_LISA:-'--use_lisa False'}
 
 
 MODE=${MODE:-ft}
@@ -81,4 +83,6 @@ python run.py \
     $EXTRA_ARGS \
     $TASK_ARGS \
     $MASK_ONLY \
+    $USE_HIZOO \
+    $USE_LISA \
     "$@"

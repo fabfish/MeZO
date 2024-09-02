@@ -115,6 +115,9 @@ class OurArguments(TrainingArguments):
     weight_decay: float = 0
     hessian_smooth_type: str = 'constant0'
 
+    use_hizoo: bool = False
+    use_lisa: bool = False
+
 
 
 def parse_args():

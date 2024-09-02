@@ -50,7 +50,7 @@ mask_only_mode = True
 # if mask_only_mode:
 # os.environ["WANDB_PROJECT"] = "HiZOO_SST" 
 # os.environ["WANDB_PROJECT"] = "HiZOO"
-os.environ["WANDB_PROJECT"] = "hizoo_squad"
+os.environ["WANDB_PROJECT"] = "hizoo_sst2"
 
 os.environ['HF_DATASETS_OFFLINE']= "1"
 
@@ -1075,6 +1075,17 @@ class OurTrainer(Trainer):
 
         self.current_step = -1
         
+        if True:
+            self.layer_numbers = []
+            for name, param in model.named_parameters():
+            # detect if the param is of a specific layer. if true, record the layer numbers to identify the model structure.
+                if "layers" in name:
+                    # normally the layer number is the digit after the word "layer" and a point, so search layer. and a digit
+                    layer_num = re.search(r'layers.\d.', name).group(0)
+                    # maintain a list of layer numbers
+                    if layer_num not in self.layer_numbers:
+                        self.layer_numbers.append(layer_num)
+            # import pdb;pdb.set_trace()
         
         for epoch in range(epochs_trained, num_train_epochs):
 
@@ -1120,6 +1131,21 @@ class OurTrainer(Trainer):
             self.q = 3
             for step, inputs in enumerate(epoch_iterator):
                 self.current_step += 1
+
+                if False:
+                    self.named_parameters_to_optim = []
+                    for name, param in model.named_parameters():
+                        # select only self.current_step % 24 to optim
+                        if "layers" in name:
+                            if "layers.{}.".format(self.current_step % 24) in name or "layers.{}.".format(((self.current_step % 24) + 1) % 24) in name:
+                                # self.named_parameters_to_optim.append((name, param))
+                                param.requires_grad_(True)
+                            else:
+                                param.requires_grad_(False)
+                        else:
+                            # self.named_parameters_to_optim.append((name, param))
+                            param.requires_grad_(True)
+
                 # test_global_step = step
                 # if self.current_step==2563:
                 if False:
@@ -1150,8 +1176,11 @@ class OurTrainer(Trainer):
 
                 # use_svrg = True
                 use_svrg = False
-                use_hizoo = True
+                # use_hizoo = True
                 # use_hizoo = False
+                use_hizoo = args.use_hizoo
+                use_lisa = args.use_lisa
+
                 # move into func
                 # if use_hizoo:
                 #     # self.zo_random_seed = np.random.randint(1000000000)
@@ -1189,9 +1218,15 @@ class OurTrainer(Trainer):
                         # print(1)
                         # tr_loss_step = self.zo_Hessian_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
                         # tr_loss_step = self.myH(model, inputs, zo_learning_rate, Hessian_smooth)
-                        tr_loss_step = self.my_hizoo_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
+                        # tr_loss_step = self.my_hizoo_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
+
+                        if use_lisa:
+                            tr_loss_step = self.my_hizoo_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
+                        else:
+                            tr_loss_step = self.zo_Hessian_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
 
                 else:
+
                     if (
                         ((step + 1) % args.gradient_accumulation_steps != 0)
                         and args.local_rank != -1
