@@ -1132,12 +1132,16 @@ class OurTrainer(Trainer):
             for step, inputs in enumerate(epoch_iterator):
                 self.current_step += 1
 
+                # bcd
                 if False:
+                # if True:
+                    torch.cuda.empty_cache()
                     self.named_parameters_to_optim = []
                     for name, param in model.named_parameters():
                         # select only self.current_step % 24 to optim
                         if "layers" in name:
                             if "layers.{}.".format(self.current_step % 24) in name or "layers.{}.".format(((self.current_step % 24) + 1) % 24) in name:
+                            # if "layers.{}.".format(self.current_step % 24) in name and not "q" in name:
                                 # self.named_parameters_to_optim.append((name, param))
                                 param.requires_grad_(True)
                             else:
@@ -1147,7 +1151,10 @@ class OurTrainer(Trainer):
                             param.requires_grad_(True)
 
                 # test_global_step = step
-                # if self.current_step==2563:
+                if self.current_step==576:
+                    # import pdb; pdb.set_trace()
+                    pass
+
                 if False:
                     for submodule in model.modules():
                         submodule.register_forward_hook(nan_hook)
@@ -1602,7 +1609,7 @@ class OurTrainer(Trainer):
             self.myhizoo_max = 5
             self.myhizoo_step = 0 # count from 10 to 0
             # self.select_layer_num = len(self.layer_numbers)
-            self.select_layer_num = 2
+            self.select_layer_num = 3
 
         # support gsq update
         if not hasattr(self, 'blocks'):
@@ -1753,10 +1760,11 @@ class OurTrainer(Trainer):
                     grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z * torch.sqrt(self.Hessian_matrix[name]))
 
                 else:
-                    # grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z)
+                    grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z)
                     # grad = torch.Tensor([0.0]).to(param.device)
-                    grad  = loss1-loss1
 
+                    # grad  = loss1-loss1
+                    # continue
 
                 if param.data.isnan().any():
                     import pdb; pdb.set_trace()

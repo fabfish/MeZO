@@ -41,3 +41,6 @@ MODEL=facebook/opt-1.3b TASK=SST2 MODE=ft LR=3e-7 EPS=1e-3 bash mezo.sh
 MODEL=facebook/opt-1.3b TASK=SST2 MODE=ft LR=3e-7 EPS=1e-3 SPARSITY=1.00 STEPS=20000 HESSIAN_SMOOTH_TYPE='constant1e-9' USE_HIZOO="--use_hizoo True" USE_LISA="--use_lisa False" bash mezo.sh
 
 {'accuracy': 0.9174311926605505, 'dev_accuracy': 0.92}
+
+
+bcd squad oom, so freeze q layers.
