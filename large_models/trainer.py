@@ -1609,7 +1609,7 @@ class OurTrainer(Trainer):
             self.myhizoo_max = 5
             self.myhizoo_step = 0 # count from 10 to 0
             # self.select_layer_num = len(self.layer_numbers)
-            self.select_layer_num = 3
+            self.select_layer_num = 1
 
         # support gsq update
         if not hasattr(self, 'blocks'):
@@ -1760,11 +1760,11 @@ class OurTrainer(Trainer):
                     grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z * torch.sqrt(self.Hessian_matrix[name]))
 
                 else:
-                    grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z)
+                    # grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z)
                     # grad = torch.Tensor([0.0]).to(param.device)
 
-                    # grad  = loss1-loss1
-                    # continue
+                    grad  = loss1-loss1
+                    continue
 
                 if param.data.isnan().any():
                     import pdb; pdb.set_trace()

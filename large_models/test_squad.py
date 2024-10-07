@@ -35,10 +35,17 @@ STEPS = "20000"
 
 configurations = [
     # {"LR": 7e-7, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
-    {"LR": 8e-7, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
-    {"LR": 9e-7, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
+    # {"LR": 8e-7, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
+    # {"LR": 9e-7, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
     # {"LR": 5e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
-    # {"LR": 2e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
+    # {"LR": 1e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
+    # {"LR": 11e-7, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
+    # {"LR": 12e-7, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
+
+    {"LR": 2e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
+    {"LR": 2.1e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
+
+
     # {"LR": 3e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
     # {"LR": 4e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
     # {"LR": 5e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
@@ -97,6 +104,6 @@ for config in configurations:
         command += f" USE_LISA='{USE_LISA}'"
 
     command += f" bash mezo.sh"
-    command += f" >> result_squad.txt 2>&1"
+    command += f" >> result_squad_newnew.txt 2>&1"
     print(f"Executing: {command}")
     os.system(command)
