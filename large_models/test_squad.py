@@ -43,7 +43,7 @@ configurations = [
     # {"LR": 12e-7, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
 
     {"LR": 2e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
-    {"LR": 2.1e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
+    # {"LR": 2.1e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},
 
 
     # {"LR": 3e-6, "HESSIAN_SMOOTH_TYPE": "constant1e-5", "USE_HIZOO": "--use_hizoo True", "USE_LISA": "--use_lisa True"},

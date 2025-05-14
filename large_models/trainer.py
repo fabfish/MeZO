@@ -1609,7 +1609,7 @@ class OurTrainer(Trainer):
             self.myhizoo_max = 5
             self.myhizoo_step = 0 # count from 10 to 0
             # self.select_layer_num = len(self.layer_numbers)
-            self.select_layer_num = 1
+            self.select_layer_num = 4
 
         # support gsq update
         if not hasattr(self, 'blocks'):
