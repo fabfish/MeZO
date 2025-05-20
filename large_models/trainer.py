@@ -1609,7 +1609,7 @@ class OurTrainer(Trainer):
             self.myhizoo_max = 5
             self.myhizoo_step = 0 # count from 10 to 0
             # self.select_layer_num = len(self.layer_numbers)
-            self.select_layer_num = 4
+            self.select_layer_num = 2
 
         # support gsq update
         if not hasattr(self, 'blocks'):
@@ -1740,9 +1740,9 @@ class OurTrainer(Trainer):
                 if is_hizoo_layer:
                     Hessian_temp = (1/self.Hessian_matrix[name] * z * z)
                     if loss_original is not None:
-                        Hessian_estimator = (torch.abs(loss1+loss2-2 * loss_original)* Hessian_temp  /(2 * self.args.zo_eps*self.args.zo_eps))
+                        Hessian_estimator = ((loss1+loss2-2 * loss_original)* Hessian_temp  /(2 * self.args.zo_eps*self.args.zo_eps))
                     else:
-                        Hessian_estimator = torch.abs(loss1 - loss2) * Hessian_temp  /(2 * self.args.zo_eps)
+                        Hessian_estimator = (loss1 - loss2) * Hessian_temp  /(2 * self.args.zo_eps)
                     # 设置上限值
                     # 65504 exceeds the max value of float16
                     Hessian_estimator.clamp_(max=max_float16, min=-max_float16) # comment for bf16
@@ -1760,10 +1760,10 @@ class OurTrainer(Trainer):
                     grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z * torch.sqrt(self.Hessian_matrix[name]))
 
                 else:
-                    # grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z)
+                    grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z)
                     # grad = torch.Tensor([0.0]).to(param.device)
 
-                    grad  = loss1-loss1
+                    # grad  = loss1-loss1
                     continue
 
                 if param.data.isnan().any():
