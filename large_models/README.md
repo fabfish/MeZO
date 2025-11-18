@@ -73,3 +73,24 @@ Our implementation of MeZO is based on [HuggingFace Trainer](https://github.com/
 * `zo_update`: update parameters by the estimated gradient.
 
 To incorporate MeZO in your own HuggingFace code, simply overload HuggingFace's `Trainer` class and edit `_inner_training_loop` as we did in `trainer.py`, and add the above MeZO functions from `trainer.py` in your trainer. For a more intuitive explanation of the MeZO algorithm, please refer to Algorithm 1 in [our paper](https://arxiv.org/pdf/2305.17333.pdf). 
+
+
+8.8
+测试脚本：
+
+SST 我们不计，只测 reviewer 希望补充的 RTE	WIC	BoolQ	WSC
+
+wsc 最好的学习率 1e-5 100步 0.635
+HF_ENDPOINT=https://hf-mirror.com CUDA_VISIBLE_DEVICES=2 MODEL=/data/models/Llama-2-7b-hf TASK=WSC MODE=ft LR=1e-5 EPS=1e-3 SPARSITY=1.00 STEPS=500 HESSIAN_SMOOTH_TYPE='constant1e-8' USE_HIZOO="--use_hizoo True" USE_LISA="--use_lisa True" bash mezo.sh
+
+CUDA 2 正在测 500 步结果 wsc
+
+CUDA 0 测 MeZO baseline
+
+CUDA 3 测 500 步 RTE
+
+HF_ENDPOINT=https://hf-mirror.com CUDA_VISIBLE_DEVICES=3 MODEL=/data/models/Llama-2-7b-hf TASK=RTE MODE=ft LR=1e-7 EPS=1e-3 SPARSITY=1.00 STEPS=500 HESSIAN_SMOOTH_TYPE='constant1e-8' USE_HIZOO="--use_hizoo True" USE_LISA="--use_lisa True" bash mezo.sh
+
+CUDA 1
+
+33840 33894

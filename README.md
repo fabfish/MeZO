@@ -55,3 +55,7 @@ MODEL=facebook/opt-1.3b TASK=SST2 MODE=ft LR=2e-6 EPS=1e-3 SPARSITY=1.00 STEPS=2
 MODEL=facebook/opt-1.3b TASK=SST2 MODE=ft LR=2.5e-6 EPS=1e-3 SPARSITY=1.00 STEPS=20000 HESSIAN_SMOOTH_TYPE='constant1e-8' USE_HIZOO="--use_hizoo True" USE_LISA="--use_lisa True" bash mezo.sh
 
 2025-05-18 10:28:22,560 - INFO - {'accuracy': 0.9162844036697247, 'dev_accuracy': 0.892}
+
+
+0729 
+MODEL=/data/models/Llama-2-7b-hf TASK=RTE MODE=ft LR=1e-6 EPS=1e-3 SPARSITY=1.00 STEPS=20000 HESSIAN_SMOOTH_TYPE='constant1e-8' USE_HIZOO="--use_hizoo True" USE_LISA="--use_lisa True" bash mezo.sh 2&1> SST2-FOCUS-Llama-2-7b-lr-1e-6.log

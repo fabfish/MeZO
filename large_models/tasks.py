@@ -114,8 +114,8 @@ class SST2Dataset(Dataset):
     def load_dataset(self, path, **kwargs):
         # d = load_dataset('glue', 'sst2', cache_dir="./data", download_mode="reuse_cache_if_exists", verification_mode = "no_checks")
         # d = load_dataset('glue', 'sst2')
-        # d.save_to_disk('~/dataset/glue/sst2')
-        d = datasets.load_from_disk("~/dataset/glue/sst2")
+        # d.save_to_disk('/data/datasets/glue/sst2')
+        d = datasets.load_from_disk("/data/datasets/glue/sst2")
         train_d = d["train"]
         validation_d = d["validation"]
         
@@ -141,8 +141,11 @@ class CopaDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
         
     def load_dataset(self, path, **kwargs):
-        train_examples = load_dataset('super_glue', "copa")["train"]
-        valid_examples = load_dataset('super_glue', "copa")["validation"]
+        d = datasets.load_from_disk("/data/datasets/super_glue/copa")
+        # train_examples = load_dataset('super_glue', "copa")["train"]
+        # valid_examples = load_dataset('super_glue', "copa")["validation"]
+        train_examples = d["train"]
+        valid_examples = d["validation"]
     
         train_samples = [self.build_sample(example) for example in train_examples]
         valid_samples = [self.build_sample(example) for example in valid_examples]
@@ -169,7 +172,8 @@ class BoolQDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("boolq")
+        # d = load_dataset("boolq")
+        d = datasets.load_from_disk("/data/datasets/super_glue/boolq")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -197,7 +201,8 @@ class MultiRCDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "multirc")
+        # d = load_dataset("super_glue", "multirc")
+        d = datasets.load_from_disk("/data/datasets/super_glue/multirc")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -225,7 +230,8 @@ class CBDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "cb")
+        # d = load_dataset("super_glue", "cb")
+        d = datasets.load_from_disk("/data/datasets/super_glue/cb")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -253,7 +259,8 @@ class WICDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "wic")
+        # d = load_dataset("super_glue", "wic")
+        d = datasets.load_from_disk("/data/datasets/super_glue/wic")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -281,7 +288,8 @@ class WSCDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "wsc.fixed")
+        # d = load_dataset("super_glue", "wsc.fixed")
+        d = datasets.load_from_disk("/data/datasets/super_glue/wsc.fixed")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -309,7 +317,8 @@ class ReCoRDDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "record")
+        # d = load_dataset("super_glue", "record")
+        d = datasets.load_from_disk("/data/datasets/super_glue/record")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -337,7 +346,8 @@ class RTEDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "rte")
+        # d = load_dataset("super_glue", "rte")
+        d = datasets.load_from_disk("/data/datasets/super_glue/rte")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -367,7 +377,8 @@ class SQuADDataset(Dataset):
         self.load_dataset()
         
     def load_dataset(self):
-        dataset = load_dataset("squad")
+        # dataset = load_dataset("squad")
+        dataset = datasets.load_from_disk("/data/datasets/squad")
         train_examples = dataset["train"]
         valid_examples = dataset["validation"]
 
@@ -403,7 +414,8 @@ class DROPDataset(Dataset):
         self.load_dataset()
         
     def load_dataset(self):
-        dataset = load_dataset("drop")
+        # dataset = load_dataset("drop")
+        dataset = datasets.load_from_disk("/data/datasets/drop")
         train_examples = dataset["train"]
         valid_examples = dataset["validation"]
 

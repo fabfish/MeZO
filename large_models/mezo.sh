@@ -69,9 +69,9 @@ echo "Extra args: $EXTRA_ARGS $TASK_ARGS"
 python run.py \
     --model_name $MODEL \
     --task_name $TASK \
-    --output_dir result/$TASK-${MODEL_NAME}-$TAG --tag $TAG --train_set_seed $SEED --num_train $TRAIN --num_dev $DEV --num_eval $EVAL --logging_steps 10 \
+    --output_dir /data/yzy/mezo/$TASK-${MODEL_NAME}-$TAG --tag $TAG --train_set_seed $SEED --num_train $TRAIN --num_dev $DEV --num_eval $EVAL --logging_steps 10 \
     --max_steps $STEPS \
-    --trainer zo --load_float16 \
+    --trainer zo  \
     --learning_rate $LR --zo_eps $EPS --per_device_train_batch_size $BS --lr_scheduler_type "constant" \
     --load_best_model_at_end --evaluation_strategy steps --save_strategy steps --save_total_limit 1 \
     --eval_steps $EVAL_STEPS --save_steps $EVAL_STEPS \

@@ -43,9 +43,9 @@ VRPGE_mode = False
 # import os
 # fish: add for proxy
 os.environ['CURL_CA_BUNDLE'] = ''
-os.environ['HTTP_PROXY'] = "http://127.0.0.1:7897"
-os.environ['HTTPS_PROXY'] = "http://127.0.0.1:7897"
-os.environ['ALL_PROXY'] = "socks5://127.0.0.1:7897"
+# os.environ['HTTP_PROXY'] = "http://127.0.0.1:7897"
+# os.environ['HTTPS_PROXY'] = "http://127.0.0.1:7897"
+# os.environ['ALL_PROXY'] = "socks5://127.0.0.1:7897"
 mask_only_mode = True
 # if mask_only_mode:
 # os.environ["WANDB_PROJECT"] = "HiZOO_SST" 
@@ -59,20 +59,20 @@ from transformers import Trainer
 from sklearn.linear_model import LinearRegression, LogisticRegression, LogisticRegressionCV
 
 # Integrations must be imported before ML frameworks:
-from transformers.integrations import (  # isort: split
-    default_hp_search_backend,
-    get_reporting_integration_callbacks,
-    hp_params,
-    is_fairscale_available,
-    is_optuna_available,
-    is_ray_tune_available,
-    is_sigopt_available,
-    is_wandb_available,
-    run_hp_search_optuna,
-    run_hp_search_ray,
-    run_hp_search_sigopt,
-    run_hp_search_wandb,
-)
+# from transformers.integrations import (  # isort: split
+    # default_hp_search_backend,
+    # get_reporting_integration_callbacks,
+    # hp_params,
+    # is_fairscale_available,
+    # is_optuna_available,
+    # is_ray_tune_available,
+    # is_sigopt_available,
+    # is_wandb_available,
+    # run_hp_search_optuna,
+    # run_hp_search_ray,
+    # run_hp_search_sigopt,
+    # run_hp_search_wandb,
+# )
 
 import numpy as np
 import torch
@@ -95,7 +95,8 @@ from transformers.modelcard import TrainingSummary
 from transformers.modeling_utils import PreTrainedModel, load_sharded_checkpoint, unwrap_model
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, MODEL_MAPPING_NAMES
 from transformers.optimization import Adafactor, get_scheduler
-from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS, is_torch_greater_or_equal_than_1_10, is_torch_less_than_1_11
+# from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS, is_torch_greater_or_equal_than_1_10, is_torch_less_than_1_11
+from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_callback import (
     CallbackHandler,
@@ -142,15 +143,15 @@ from transformers.trainer_utils import (
     TrainerMemoryTracker,
     TrainOutput,
     default_compute_objective,
-    default_hp_space,
-    denumpify_detensorize,
-    enable_full_determinism,
-    find_executable_batch_size,
-    get_last_checkpoint,
+    # default_hp_space,
+    # denumpify_detensorize,
+    # enable_full_determinism,
+    # find_executable_batch_size,
+    # get_last_checkpoint,
     has_length,
-    number_of_arguments,
-    seed_worker,
-    set_seed,
+    # number_of_arguments,
+    # seed_worker,
+    # set_seed,
     speed_metrics,
 )
 from transformers.training_args import OptimizerNames, ParallelMode, TrainingArguments
@@ -178,7 +179,7 @@ from Hessian_smooth_scheduler import Hessian_smooth_scheduler, Hessian_smooth_sc
 
 
 
-_is_native_cpu_amp_available = is_torch_greater_or_equal_than_1_10
+# _is_native_cpu_amp_available = is_torch_greater_or_equal_than_1_10
 
 DEFAULT_CALLBACKS = [DefaultFlowCallback]
 DEFAULT_PROGRESS_CALLBACK = ProgressCallback
@@ -201,14 +202,14 @@ if is_torch_tpu_available(check_device=False):
     import torch_xla.debug.metrics as met
     import torch_xla.distributed.parallel_loader as pl
 
-if is_fairscale_available():
-    dep_version_check("fairscale")
-    import fairscale
-    from fairscale.nn.data_parallel import FullyShardedDataParallel as FullyShardedDDP
-    from fairscale.nn.data_parallel import ShardedDataParallel as ShardedDDP
-    from fairscale.nn.wrap import auto_wrap
-    from fairscale.optim import OSS
-    from fairscale.optim.grad_scaler import ShardedGradScaler
+# if is_fairscale_available():
+#     dep_version_check("fairscale")
+#     import fairscale
+#     from fairscale.nn.data_parallel import FullyShardedDataParallel as FullyShardedDDP
+#     from fairscale.nn.data_parallel import ShardedDataParallel as ShardedDDP
+#     from fairscale.nn.wrap import auto_wrap
+#     from fairscale.optim import OSS
+#     from fairscale.optim.grad_scaler import ShardedGradScaler
 
 
 if is_sagemaker_mp_enabled():
@@ -596,7 +597,7 @@ class NMlinearfunction(torch.autograd.Function):
             grad_mask = grad_output.t().matmul(input)
         return grad_input, grad_weight, grad_bias, grad_mask
     
-from torch.sparse import to_sparse_semi_structured
+# from torch.sparse import to_sparse_semi_structured
 class NMLinear(nn.Linear):
     # n=2 m=4 
     def __init__(self, *args, **kwargs):
@@ -1028,8 +1029,9 @@ class OurTrainer(Trainer):
             # parameter to Train when using DDP.
             self.state.trial_name = self.hp_name(self._trial)
         if trial is not None:
-            assignments = trial.assignments if self.hp_search_backend == HPSearchBackend.SIGOPT else trial
-            self.state.trial_params = hp_params(assignments)
+            # assignments = trial.assignments if self.hp_search_backend == HPSearchBackend.SIGOPT else trial
+            # self.state.trial_params = hp_params(assignments)
+            self.state.trial_params = None
         else:
             self.state.trial_params = None
         # This should be the same if the state has been saved but in case the training arguments changed, it's safer
@@ -1054,7 +1056,8 @@ class OurTrainer(Trainer):
                 is_random_sampler = hasattr(train_dataloader, "sampler") and isinstance(
                     train_dataloader.sampler, RandomSampler
                 )
-                if is_torch_less_than_1_11 or not is_random_sampler:
+                # if is_torch_less_than_1_11 or not is_random_sampler:
+                if False or not is_random_sampler:
                     # We just need to begin an iteration to create the randomization of the sampler.
                     # That was before PyTorch 1.11 however...
                     for _ in train_dataloader:
@@ -1701,7 +1704,7 @@ class OurTrainer(Trainer):
         random_seed = np.random.randint(1000000000)
 
         second_only = True
-        max_float16 = 65504
+        max_float16 = 1000000
 
         with torch.no_grad():
             loss_original = None
@@ -1724,6 +1727,9 @@ class OurTrainer(Trainer):
             # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
             model = self.my_hizoo_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1, myhizoo_layers=self.myhizoo_layer, second_only=second_only)
             # self.saved_model = copy.deepcopy(model)
+
+            if loss2.isnan():
+                loss2 = loss1
             
             torch.manual_seed(random_seed)
             for name, param in self.named_parameters_to_optim:
@@ -1756,6 +1762,10 @@ class OurTrainer(Trainer):
                     # self.Hessian_matrix[name] = ((1-Hessian_smooth) * self.Hessian_matrix[name] +  Hessian_smooth * Hessian_estimator)
                     self.Hessian_matrix[name] = ((1-Hessian_smooth) * self.Hessian_matrix[name] +  Hessian_smooth * Hessian_estimator).clamp_(max=max_float16, min=-max_float16)
                     # print(self.Hessian_matrix[name])
+                    if self.Hessian_matrix[name].isnan().any():
+                        self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+                        # import pdb; pdb.set_trace()
+                        # pass
 
                     grad = ((loss1-loss2)/(2 * self.args.zo_eps) * z * torch.sqrt(self.Hessian_matrix[name]))
 
@@ -1779,7 +1789,17 @@ class OurTrainer(Trainer):
                     # pass
 
                 else:
+                    tmp_data = param.data
                     param.data = tmp
+                    loss_tmp = self.zo_forward(model, inputs)
+                    if loss_tmp.isnan():
+                        # import pdb; pdb.set_trace()
+                        param.data = tmp_data
+                        # print("nan detected, skip this update")
+                    else:
+                        # print("update {} with hizoo".format(name))
+                        pass
+
 
                 if name == "model.decoder.layers.0.fc1.weight":
                     # print(1)
@@ -1856,7 +1876,7 @@ class OurTrainer(Trainer):
                 z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype, generator=g1)
                 z2 = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype, generator=g2)
                 
-                max_float16 = 65504
+                max_float16 = 50000
                 
                 # debuug code:
                 # nan_indices = torch.where(torch.isnan(self.Hessian_matrix[name][0]))[0]
