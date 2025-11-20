@@ -58,6 +58,22 @@ from tqdm.auto import tqdm
 from transformers import Trainer
 from sklearn.linear_model import LinearRegression, LogisticRegression, LogisticRegressionCV
 
+# Integrations must be imported before ML frameworks:
+# from transformers.integrations import (  # isort: split
+    # default_hp_search_backend,
+    # get_reporting_integration_callbacks,
+    # hp_params,
+    # is_fairscale_available,
+    # is_optuna_available,
+    # is_ray_tune_available,
+    # is_sigopt_available,
+    # is_wandb_available,
+    # run_hp_search_optuna,
+    # run_hp_search_ray,
+    # run_hp_search_sigopt,
+    # run_hp_search_wandb,
+# )
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -92,13 +108,50 @@ from transformers.trainer_callback import (
     TrainerState,
 )
 from transformers.trainer_pt_utils import (
+    DistributedLengthGroupedSampler,
+    DistributedSamplerWithLoop,
+    DistributedTensorGatherer,
     IterableDatasetShard,
+    LabelSmoother,
+    LengthGroupedSampler,
+    SequentialDistributedSampler,
+    ShardSampler,
+    distributed_broadcast_scalars,
+    distributed_concat,
+    find_batch_size,
+    get_module_class_from_name,
+    get_parameter_names,
+    nested_concat,
+    nested_detach,
+    nested_numpify,
+    nested_truncate,
+    nested_xla_mesh_reduce,
+    reissue_pt_warnings,
 )
 from transformers.trainer_utils import (
+    PREFIX_CHECKPOINT_DIR,
+    BestRun,
+    EvalLoopOutput,
+    EvalPrediction,
+    FSDPOption,
+    HPSearchBackend,
+    HubStrategy,
+    IntervalStrategy,
+    PredictionOutput,
+    RemoveColumnsCollator,
     ShardedDDPOption,
     TrainerMemoryTracker,
     TrainOutput,
+    default_compute_objective,
+    # default_hp_space,
+    # denumpify_detensorize,
+    # enable_full_determinism,
+    # find_executable_batch_size,
+    # get_last_checkpoint,
     has_length,
+    # number_of_arguments,
+    # seed_worker,
+    # set_seed,
     speed_metrics,
 )
 from transformers.training_args import OptimizerNames, ParallelMode, TrainingArguments
@@ -111,6 +164,8 @@ from transformers.utils import (
     is_apex_available,
     is_datasets_available,
     is_in_notebook,
+    is_ipex_available,
+    is_sagemaker_dp_enabled,
     is_sagemaker_mp_enabled,
     is_torch_tensorrt_fx_available,
     is_torch_tpu_available,
@@ -129,12 +184,47 @@ from Hessian_smooth_scheduler import Hessian_smooth_scheduler, Hessian_smooth_sc
 DEFAULT_CALLBACKS = [DefaultFlowCallback]
 DEFAULT_PROGRESS_CALLBACK = ProgressCallback
 
+if is_in_notebook():
+    from .utils.notebook import NotebookProgressCallback
+
+    DEFAULT_PROGRESS_CALLBACK = NotebookProgressCallback
+
+if is_apex_available():
+    from apex import amp
+
 if is_datasets_available():
     # 
     os.environ['HF_DATASETS_OFFLINE '] = "1"
     import datasets
 
-IS_SAGEMAKER_MP_POST_1_10 = False
+if is_torch_tpu_available(check_device=False):
+    import torch_xla.core.xla_model as xm
+    import torch_xla.debug.metrics as met
+    import torch_xla.distributed.parallel_loader as pl
+
+# if is_fairscale_available():
+#     dep_version_check("fairscale")
+#     import fairscale
+#     from fairscale.nn.data_parallel import FullyShardedDataParallel as FullyShardedDDP
+#     from fairscale.nn.data_parallel import ShardedDataParallel as ShardedDDP
+#     from fairscale.nn.wrap import auto_wrap
+#     from fairscale.optim import OSS
+#     from fairscale.optim.grad_scaler import ShardedGradScaler
+
+
+if is_sagemaker_mp_enabled():
+    import smdistributed.modelparallel.torch as smp
+    from smdistributed.modelparallel import __version__ as SMP_VERSION
+
+    IS_SAGEMAKER_MP_POST_1_10 = version.parse(SMP_VERSION) >= version.parse("1.10")
+
+    from .trainer_pt_utils import smp_forward_backward, smp_forward_only, smp_gather, smp_nested_concat
+else:
+    IS_SAGEMAKER_MP_POST_1_10 = False
+
+
+if TYPE_CHECKING:
+    import optuna
 
 logger = logging.get_logger(__name__)
 
@@ -215,6 +305,429 @@ def nan_hook(self, inp, out):
         elif isinstance(out, (list, tuple)):
             print(f'Output length: {len(out)}')
 
+
+############################################
+# following modules are for masked finetuning
+# masked bert: normal optimizer, sample mask + finetune
+# vrpge: vrpge update, mask + finetune
+# mask only vrpge: mask tuning
+# mezo: fo ft
+# mask only mezo: mask tuning
+class _Binarizer3(torch.autograd.Function):
+    # method based on masking as an efficient alternative to finetuning
+    @staticmethod
+    def forward(ctx, inputs):
+        return torch.bernoulli(inputs).bool()
+
+    @staticmethod
+    def backward(ctx, gradOutput):
+        return gradOutput
+    
+class linear(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, weight, bias=None, mask=None):
+        ctx.with_mask = False
+        if mask is not None:
+            weight = weight * torch.bernoulli(mask)
+
+            # weight = weight * torch.bernoulli(torch.sigmoid(mask))
+
+            # note that mask is of low precision
+            # mask f16, weight f32
+            # import pdb; pdb.set_trace()
+            ctx.with_mask = True
+
+        ctx.save_for_backward(weight, bias, x)
+        ctx.weight_dtype = weight.dtype
+        ctx.mask_dtype = mask.dtype if mask is not None else None
+        return F.linear(x, weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_input = grad_weight = grad_bias = grad_mask =  None
+
+        tensors = ctx.saved_tensors
+        weight, bias, input = tensors
+        # 32, 32, 16
+
+        if ctx.needs_input_grad[0]:
+            grad_input = grad_output.matmul(weight.to(dtype=grad_output.dtype))
+        # else:
+            # the first layer
+            # import pdb; pdb.set_trace()
+
+        if ctx.needs_input_grad[1]:
+
+            grad_weight = grad_output.transpose(-2, -1).matmul(input).to(dtype=grad_output.dtype)
+
+            if ctx.with_mask and ctx.needs_input_grad[3]:
+
+                # grad_mask = grad_output.transpose(-2, -1).matmul(input.to(dtype=ctx.mask_dtype))
+                grad_mask = grad_output.transpose(-2, -1).matmul(input.to(dtype=grad_output.dtype))
+
+        if bias is not None and ctx.needs_input_grad[2]:
+            grad_bias = grad_output.sum(0)
+
+        if ctx.with_mask and ctx.needs_input_grad[3]:
+
+            if grad_mask is None:
+                # grad_mask = grad_output.transpose(-2, -1).matmul(input.to(dtype=ctx.mask_dtype))
+                grad_mask = grad_output.transpose(-2, -1).matmul(input.to(dtype=grad_output.dtype))
+
+        # import pdb; pdb.set_trace()
+
+        # return grad_input, grad_weight, grad_bias, grad_mask
+        # if scores is half, the output will be
+        # f16, None, f16, f16
+
+        # unknown amp scaler error /home/*/anaconda3/lib/python3.10/site-packages/torch/cuda/amp/grad_scaler.py", line 258
+        # return grad_input.float(), grad_weight, grad_bias.float(), grad_mask.float()
+        return grad_input, grad_weight, grad_bias, grad_mask
+    
+class StraightThroughBinomialSampleNoGrad(torch.autograd.Function):
+    # method took from vrpge
+    @staticmethod
+    def forward(ctx, scores):
+        output = (torch.rand_like(scores) < scores).float()
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        return torch.zeros_like(grad_outputs)
+
+class MaskedLinear(nn.Linear):
+    '''
+    update: gradient based
+    '''
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None, sparsity = 0.95):
+        super().__init__(in_features, out_features, bias, device, dtype)
+        self.scores = nn.Parameter(torch.Tensor(self.weight.size()).to(dtype=torch.float16))
+        self.train_weights = False
+        if self.train_weights == False:
+            self.weight.requires_grad_(False)
+        
+        # print(sparsity)
+        self.score_init_constant = sparsity
+        # it is important to set to half precision
+        self.scores.data = (
+            # torch.ones_like(self.scores).half() * self.score_init_constant
+            torch.ones_like(self.scores) * self.score_init_constant
+        )
+        # print(self.scores)
+
+    @property
+    def clamped_scores(self):
+        return self.scores
+
+    def forward(self, x):
+        # if self.training:
+        if True:
+        #     # logger.info("eval mode")
+        #     w = (self.weight > self.score_init_constant).float()
+        #     w = self.weight * w
+        #     x = F.linear(x, w, self.bias)
+        # else:
+            # logger.info("train mode")
+            # keep scores > 0 
+            self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+            # self.subnet = StraightThroughBinomialSampleNoGrad.apply(self.scores)
+            # self.subnet = _Binarizer3.apply(self.scores)
+
+            # w = self.weight * self.subnet
+            # w = w.to(self.weight.dtype)
+            # x = x.to(self.weight.dtype)
+            try:
+                # x = F.linear(x, w, self.bias)
+                x = linear.apply(x, self.weight, self.bias, self.scores)
+            except:
+                import pdb; pdb.set_trace()
+
+            # logger.info("train mode")
+
+        else:
+            
+
+            # w = self.weight * self.subnet
+            # w = (self.weight > self.score_init_constant).float()
+            # w = self.weight * w
+
+            # self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+
+            self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+            w = self.weight * torch.bernoulli(self.scores)
+
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+
+        return x
+    
+class MaskedLinearS(nn.Linear):
+    '''
+    update: gradient based
+    '''
+    def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None, sparsity = 0.95):
+        super().__init__(in_features, out_features, bias, device, dtype)
+        self.scores = nn.Parameter(torch.Tensor(self.weight.size()))
+        self.train_weights = False
+        if self.train_weights == False:
+            self.weight.requires_grad_(False)
+        
+        # print(sparsity)
+        self.score_init_constant = sparsity
+        # it is important to set to half precision
+        self.scores.data = (
+            # torch.ones_like(self.scores).half() * self.score_init_constant
+            torch.ones_like(self.scores) * self.score_init_constant
+        )
+        # print(self.scores)
+
+    @property
+    def clamped_scores(self):
+        return self.scores
+
+    def forward(self, x):
+        # if self.training:
+        if True:
+        #     # logger.info("eval mode")
+        #     w = (self.weight > self.score_init_constant).float()
+        #     w = self.weight * w
+        #     x = F.linear(x, w, self.bias)
+        # else:
+            # logger.info("train mode")
+            # keep scores > 0 
+            self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+            # self.subnet = StraightThroughBinomialSampleNoGrad.apply(self.scores)
+            # self.subnet = _Binarizer3.apply(self.scores)
+
+            # w = self.weight * self.subnet
+            # w = w.to(self.weight.dtype)
+            # x = x.to(self.weight.dtype)
+
+            try:
+                # x = F.linear(x, w, self.bias)
+                x = linear.apply(x, self.weight, self.bias, self.scores)
+            except:
+                import pdb; pdb.set_trace()
+
+            # logger.info("train mode")
+            # x = linear.apply(x, self.weight, self.bias, self.scores)
+
+            # w = self.weight * torch.bernoulli(self.scores)
+            # x = F.linear(x, self.weight, self.bias)
+
+        else:
+            
+
+            # w = self.weight * self.subnet
+            # w = (self.weight > self.score_init_constant).float()
+            # w = self.weight * w
+
+            # self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+
+            self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+            w = self.weight * torch.bernoulli(self.scores)
+
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+
+        return x
+
+def get_n_m_sparse_matrix(w, N=2, M=4):
+    length = w.numel()
+    group = int(length / M)
+    w_tmp = w.t().detach().abs().reshape(group, M)
+    index = torch.argsort(w_tmp, dim=1)[:, :int(M - N)]
+    mask = torch.ones(w_tmp.shape, device=w_tmp.device)
+    mask = mask.scatter_(dim=1, index=index, value=0).reshape(w.t().shape).t()
+    return w * mask, mask.bool()
+
+def generate_sparsity_mask(tensor, sparsity):
+    """
+    Generate a binary mask tensor by sorting tensor elements and masking out the smallest ones
+    based on the given sparsity, and move it to the specified device.
+    
+    Parameters:
+        tensor (torch.Tensor): The input tensor.
+        sparsity (float): The sparsity level (between 0 and 1), where 1 means all zeros.
+        device (str): The device identifier where the mask will be placed (default 'cuda:0').
+
+    Returns:
+        torch.Tensor: A binary mask tensor with the same shape as the input tensor, on the specified device.
+    """
+    # 确保稀疏度在有效范围内
+    if not (0 <= sparsity <= 1):
+        raise ValueError("Sparsity must be between 0 and 1.")
+    
+    # 检查设备是否可用
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available on this system.")
+    
+    # 确定保留元素的数量
+    num_elements = tensor.numel()
+    num_to_retain = int((1 - sparsity) * num_elements)
+    
+    # 排序元素并生成掩码
+    _, indices = torch.sort(torch.abs(tensor.view(-1)), descending=True)
+    mask_indices = indices[:num_to_retain]  # 只保留绝对值最大的元素索引
+    mask = torch.zeros(num_elements, device=tensor.device)
+    mask[mask_indices] = 1
+    mask = mask.reshape(tensor.shape)
+
+    return mask.float() * tensor, mask.bool()
+
+class NMlinearfunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, weight, bias, mask):
+        ctx.save_for_backward(input, weight, bias, mask)
+        return F.linear(input, mask * weight, bias)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, weight, bias, mask = ctx.saved_tensors
+        grad_input = grad_weight = grad_bias = grad_mask = None
+        if ctx.needs_input_grad[0]:
+            # grad_input = grad_output.matmul(weight.t())
+            grad_input = grad_output.matmul((mask*weight).t())
+        if ctx.needs_input_grad[1]:
+            grad_weight = mask * (grad_output.t().matmul(input))
+        if bias is not None and ctx.needs_input_grad[2]:
+            grad_bias = grad_output.sum(0)
+        if ctx.needs_input_grad[3]:
+            import pdb; pdb.set_trace()
+            grad_mask = grad_output.t().matmul(input)
+        return grad_input, grad_weight, grad_bias, grad_mask
+    
+# from torch.sparse import to_sparse_semi_structured
+class NMLinear(nn.Linear):
+    # n=2 m=4 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.train_weights = True
+        if self.train_weights == False:
+            self.weight.requires_grad_(False)
+        self.score_init_constant = 0.5
+
+    def forward(self, x):
+        # if self.training:
+        if True:
+            # _, m = get_n_m_sparse_matrix(self.weight)
+            _, m = get_n_m_sparse_matrix(self.weight)
+            # w device is cuda
+            # w = nn.Parameter(to_sparse_semi_structured(self.weight.masked_fill(~m, 0)))
+            # took 50% more time
+            w, m = generate_sparsity_mask(self.weight, self.score_init_constant)
+            w = w.to(x.dtype)
+            # import pdb; pdb.set_trace()
+            self.bias = self.bias.to(x.dtype)
+            # m = m.to(x.dtype)
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+            # no need
+            # x = NMlinearfunction.apply(x, w, self.bias, m)
+        else:
+            w = self.weight * self.subnet
+            w = w.to(x.dtype)
+            self.bias = self.bias.to(x.dtype)
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+
+        return x
+
+class VRPGEMaskedLinear(nn.Linear):
+    def __init__(self, sparsity = 0.95, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scores = nn.Parameter(torch.Tensor(self.weight.size()))
+        self.register_buffer('subnet', torch.zeros_like(self.scores))
+        self.train_weights = True
+        if self.train_weights == False:
+            self.weight.requires_grad_(False)
+        self.score_init_constant = sparsity
+        self.scores.data = (
+                torch.ones_like(self.scores) * self.score_init_constant
+        )
+        self.register_buffer("stored_mask_0", torch.zeros_like(self.scores))
+        self.register_buffer("stored_mask_1", torch.zeros_like(self.scores))
+        self.j = 0
+        self.subnet = torch.zeros_like(self.scores)
+
+    @property
+    def clamped_scores(self):
+        return self.scores
+
+    def fix_subnet(self):
+        self.subnet = (torch.rand_like(self.scores) < self.clamped_scores).float()
+
+    def forward(self, x):
+        # if True:
+        self.scores.data = torch.clamp(self.scores.data, min=0.0, max=1.0)
+        self.subnet = StraightThroughBinomialSampleNoGrad.apply(self.scores)
+        # if self.training:
+        if True:
+            # keep scores > 0 
+            
+            # self.subnet = _Binarizer3.apply(self.scores)
+            if self.j == 0:
+                self.stored_mask_0.data = (self.subnet-self.scores)/torch.sqrt((self.scores+1e-20)*(1-self.scores+1e-20))
+                self.j = 1
+            else:
+                self.stored_mask_1.data = (self.subnet-self.scores)/torch.sqrt((self.scores+1e-20)*(1-self.scores+1e-20))
+                self.j = 0
+            w = self.weight * self.subnet
+            w = w.to(x.dtype)
+            self.bias = self.bias.to(x.dtype)
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+        else:
+            w = self.weight * self.subnet
+            w = w.to(x.dtype)
+            self.bias = self.bias.to(x.dtype)
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+
+        return x
+    
+class VRPGELinear(nn.Linear):
+    def __init__(self, sparsity = 0.95, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.scores = nn.Parameter(torch.Tensor(self.weight.size()))
+        # self.register_buffer('subnet', torch.zeros_like(self.scores))
+        # self.train_weights = True
+        # if self.train_weights == False:
+        #     self.weight.requires_grad_(False)
+        # self.score_init_constant = sparsity
+        # self.scores.data = (
+        #         torch.ones_like(self.scores) * self.score_init_constant
+        # )
+        self.register_buffer("stored_mask_0", torch.zeros_like(self.weight))
+        self.register_buffer("stored_mask_1", torch.zeros_like(self.weight))
+        self.j = 0
+        # self.subnet = torch.zeros_like(self.weight)
+
+    def forward(self, x):
+        # if self.training:
+        if True:
+            # keep scores > 0 
+            if self.j == 0:
+                self.stored_mask_0.data = (self.subnet-self.scores)/torch.sqrt((self.scores+1e-20)*(1-self.scores+1e-20))
+                self.j = 1
+            else:
+                self.stored_mask_1.data = (self.subnet-self.scores)/torch.sqrt((self.scores+1e-20)*(1-self.scores+1e-20))
+                self.j = 0
+            w = self.weight.to(x.dtype)
+            self.bias = self.bias.to(x.dtype)
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+        else:
+            w = self.weight * self.subnet
+            w = w.to(x.dtype)
+            self.bias = self.bias.to(x.dtype)
+            # x = F.conv2d(x, w, self.bias, self.stride, self.padding, self.dilation, self.groups)
+            x = F.linear(x, w, self.bias)
+
+        return x
+    
+
+
 class OurTrainer(Trainer):
 
     from transformers.trainer_pt_utils import _get_learning_rate, log_metrics, metrics_format, save_metrics, save_state
@@ -230,7 +743,67 @@ class OurTrainer(Trainer):
         # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
 
+        # Do the layer replacing before all the change on the model
+
+        print("Mask only mode is ",self.args.mask_only_mode)
+        print("Sparsity is set to ",self.args.sparsity)
         print(self.model)
+        ## VRPGE
+        mask_mode = self.args.mask_only_mode
+        # VRPGE_mode=False
+        # import pdb; pdb.set_trace()
+        if mask_mode == True:
+            model = self.model
+            # Create a list of items to iterate over
+            items = list(model.named_modules())
+
+            for n, m in items:
+                if isinstance(m, nn.Linear):
+                    # if n.endswith("query") or n.endswith("value") or n.endswith("attention.output.dense"):
+                    # if "attention" in n or "output" in n:
+                    # if "attention" in n:
+                    # if n.endswith("attention.output.dense"):
+                    # if n.endswith("out_proj") or n.endswith("k_proj") or n.endswith("v_proj") or n.endswith("fc1") or n.endswith("fc2"):
+                    # if True:
+                    if not n.endswith("head"):
+                    # if n.endswith("v_proj"):
+                        print("replacing {}".format(n))
+                        # new_module = LinearSparse(m.in_features, m.out_features).to(self.model.device)
+                        # new_module = IA3Layer(m.in_features, m.out_features).to(self.model.device)
+                        # new_module = VRPGEMaskedLinear(self.args.sparsity, m.in_features, m.out_features).to(self.model.device)
+                        new_module = NMLinear(m.in_features, m.out_features).to(self.model.device)
+                        # new_module = MaskedLinear(m.in_features, m.out_features, sparsity=self.args.sparsity).to(self.model.device)
+                        # Copy the weights and biases
+                        new_module.weight.data = m.weight.data.clone()
+                        if m.bias is not None:
+                            new_module.bias.data = m.bias.data.clone()
+                        # Replace the module
+                        name_parts = n.split('.')
+                        parent = model
+                        for part in name_parts[:-1]:
+                            parent = getattr(parent, part)
+                        setattr(parent, name_parts[-1], new_module)
+
+            # import pdb; pdb.set_trace()
+            for name, param in model.named_parameters():
+                # if (not "lm" in name) and (not "embedding" in name) and (not "scores"  in name):
+                # if not "lm" in name:
+                if not "score" in name:
+                # if not "embedding" in name:
+                # if True:
+                # if "proj" in name or "fc" in name or "layer_norm" in name:
+                    # param.requires_grad_(False)
+                    pass
+
+            print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    print(name)
+
+            # import pdb; pdb.set_trace()
+            self.model = model            
+
+
 
         # MeZO added: Linear probing
         if self.args.linear_probing:
@@ -494,6 +1067,15 @@ class OurTrainer(Trainer):
                     # AT THE VERY END!
                     _ = list(train_dataloader.sampler)
 
+        # fish: add memory tracker
+        self._memory_tracker = TrainerMemoryTracker(self.args.skip_memory_metrics)
+        self._memory_tracker.start()
+
+        # for submodule in model.modules():
+        #     if isinstance(submodule, nn.Linear) or isinstance(submodule, nn.Embedding) or isinstance(submodule, nn.ReLU) or isinstance(submodule, nn.LayerNorm) or isinstance(submodule, nn.Dropout):    
+        #         submodule.register_forward_hook(nan_hook)
+        #         print("Register hook for {}".format(submodule))
+
         self.current_step = -1
         
         if True:
@@ -513,6 +1095,9 @@ class OurTrainer(Trainer):
             # fish: add this to control eval
             # print("epoch start")
             model.train()
+            # print("epoch start, model.train is", self.model.training)
+            if not self.model.training:
+                import pdb; pdb.set_trace()
 
             zo_learning_rate = zo_lr_scheduler(self.args.learning_rate, self.args.zo_lr_scheduler_type, self.args.warmup_step, self.args.decay_step, self.state.global_step, int(num_train_epochs))
             # zo_learning_rate = self.args.learning_rate
@@ -525,7 +1110,11 @@ class OurTrainer(Trainer):
             elif hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDatasetShard):
                 train_dataloader.dataset.set_epoch(epoch)
 
-            epoch_iterator = train_dataloader
+            if is_torch_tpu_available():
+                parallel_loader = pl.ParallelLoader(train_dataloader, [args.device]).per_device_loader(args.device)
+                epoch_iterator = parallel_loader
+            else:
+                epoch_iterator = train_dataloader
 
             # Reset the past mems state at the beginning of each epoch if necessary.
             if args.past_index >= 0:
@@ -564,6 +1153,18 @@ class OurTrainer(Trainer):
                             # self.named_parameters_to_optim.append((name, param))
                             param.requires_grad_(True)
 
+                # test_global_step = step
+                if self.current_step==576:
+                    # import pdb; pdb.set_trace()
+                    pass
+
+                if False:
+                    for submodule in model.modules():
+                        submodule.register_forward_hook(nan_hook)
+                    # import pdb;pdb.set_trace()
+
+                # model.train()
+                # print("epoch start, model.train is", self.model.training)
                 if not self.model.training:
                     # import pdb; pdb.set_trace()
                     self.model.train()
@@ -585,14 +1186,49 @@ class OurTrainer(Trainer):
 
                 # use_svrg = True
                 use_svrg = False
+                # use_hizoo = True
+                # use_hizoo = False
                 use_hizoo = args.use_hizoo
                 use_lisa = args.use_lisa
 
+                # move into func
+                # if use_hizoo:
+                #     # self.zo_random_seed = np.random.randint(1000000000)
+                #     self.Hessian_matrix = {}
+                #     for name, param in model.named_parameters():
+                #         if param.requires_grad:
+                #             self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+                # MeZO added: estimate gradient
+                if args.trainer == "zo":
+                    pass
+                else:
+                    pass
+                    # for name, param in model.named_parameters():
+                    #     if not ("23" in name) and not ("embed" in name) and not ("head" in name):
+                    #         param.requires_grad_(False)
 
                 if args.trainer == "zo":
-                    if not use_hizoo:
+                    if (not use_svrg) and (not use_hizoo):
                         tr_loss_step = self.zo_step(model, inputs)
+                    elif use_svrg:
+                    # use svrg
+                        self.named_parameters_to_optim = []
+                        for name, param in model.named_parameters():
+                            if param.requires_grad:
+                                self.named_parameters_to_optim.append((name, param))
+                        if step % self.q == 0:
+                            # save model weights
+                            saved_model = copy.deepcopy(model)
+                            self.saved_model = saved_model
+                            tr_loss_step = self.svrg_step(model, inputs, 1)
+                        else:
+                            tr_loss_step = self.svrg_step(model, inputs, 0)
+                            # self.zo_step(self.saved_model, inputs)
                     elif use_hizoo:
+                        # print(1)
+                        # tr_loss_step = self.zo_Hessian_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
+                        # tr_loss_step = self.myH(model, inputs, zo_learning_rate, Hessian_smooth)
+                        # tr_loss_step = self.my_hizoo_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
 
                         if use_lisa:
                             tr_loss_step = self.my_hizoo_step_update(model, inputs, zo_learning_rate, Hessian_smooth)
@@ -610,6 +1246,12 @@ class OurTrainer(Trainer):
                         with model.no_sync():
                             tr_loss_step = self.training_step(model, inputs)
                     else:
+
+                        # # model.train()
+                        # # print("epoch start, model.train is", self.model.training)
+                        # if not self.model.training:
+                        #     import pdb; pdb.set_trace()
+
                         tr_loss_step = self.training_step(model, inputs)
 
                 if (
@@ -637,6 +1279,20 @@ class OurTrainer(Trainer):
                     if args.trainer == "zo":
                         if (not use_svrg) and (not use_hizoo):
                             self.zo_update(model)
+                            # self.zo_vrpge_update(model)
+                        elif use_svrg:
+
+                            self.svrg_update(model)
+
+                            if step % self.q != 0:
+                                self.named_parameters_to_optim = []
+                                for name, param in model.named_parameters():
+                                    if param.requires_grad:
+                                        self.named_parameters_to_optim.append((name, param))
+                                self.saved_parameters = self.named_parameters_to_optim
+                                self.svrg_step(self.saved_model, inputs, 0)
+                                self.named_parameters_to_optim = self.saved_parameters
+                                self.svrg_update(model, 0)
 
                     else:
                         # Gradient clipping
@@ -645,23 +1301,40 @@ class OurTrainer(Trainer):
 
                             if self.do_grad_scaling:
                                 # Reduce gradients first for XLA
+                                if is_torch_tpu_available():
+                                    gradients = xm._fetch_gradients(self.optimizer)
+                                    xm.all_reduce("sum", gradients, scale=1.0 / xm.xrt_world_size())
                                 # AMP: gradients need unscaling
                                 # import pdb; pdb.set_trace()
                                 # check optimzer states here
                                 self.scaler.unscale_(self.optimizer)
                                 # self.scaler.unscale_(self.optimizer)
 
-                            if hasattr(self.optimizer, "clip_grad_norm"):
+                            if is_sagemaker_mp_enabled() and args.fp16:
+                                self.optimizer.clip_master_grads(args.max_grad_norm)
+                            elif hasattr(self.optimizer, "clip_grad_norm"):
                                 # Some optimizers (like the sharded optimizer) have a specific way to do gradient clipping
                                 self.optimizer.clip_grad_norm(args.max_grad_norm)
                             elif hasattr(model, "clip_grad_norm_"):
                                 # Some models (like FullyShardedDDP) have a specific way to do gradient clipping
                                 model.clip_grad_norm_(args.max_grad_norm)
+                            else:
+                                # Revert to normal clipping otherwise, handling Apex or full precision
+                                nn.utils.clip_grad_norm_(
+                                    amp.master_params(self.optimizer) if self.use_apex else model.parameters(),
+                                    args.max_grad_norm,
+                                )
 
                         # Optimizer step
                         optimizer_was_run = True
                         if self.deepspeed:
                             pass  # called outside the loop
+                        elif is_torch_tpu_available():
+                            if self.do_grad_scaling:
+                                self.scaler.step(self.optimizer)
+                                self.scaler.update()
+                            else:
+                                xm.optimizer_step(self.optimizer)
                         elif self.do_grad_scaling:
                             scale_before = self.scaler.get_scale()
                             self.scaler.step(self.optimizer)
@@ -696,6 +1369,15 @@ class OurTrainer(Trainer):
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
             self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
 
+            if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
+                if is_torch_tpu_available():
+                    # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
+                    xm.master_print(met.metrics_report())
+                else:
+                    logger.warning(
+                        "You enabled PyTorch/XLA debug metrics but you don't have a TPU "
+                        "configured. Check your training configuration if this is unexpected."
+                    )
             if self.control.should_training_stop:
                 break
 
@@ -708,9 +1390,13 @@ class OurTrainer(Trainer):
         model.eval()
         if args.load_best_model_at_end and self.state.best_model_checkpoint is not None:
             # Wait for everyone to get here so we are sur the model has been saved by process 0.
-            if args.local_rank != -1:
+            if is_torch_tpu_available():
+                xm.rendezvous("load_best_model_at_end")
+            elif args.local_rank != -1:
                 # dist.barrier()
                 pass
+            elif is_sagemaker_mp_enabled():
+                smp.barrier()
 
             self._load_best_model()
 
@@ -796,7 +1482,6 @@ class OurTrainer(Trainer):
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
-
 
         # # support gsq update
         # if not hasattr(self, 'blocks'):
@@ -950,6 +1635,7 @@ class OurTrainer(Trainer):
             # choose the next layer
             self.myhizoo_layer = []
 
+
             del self.Hessian_matrix
             torch.cuda.empty_cache()
             # self.zo_random_seed = np.random.randint(1000000000)
@@ -1045,6 +1731,9 @@ class OurTrainer(Trainer):
             if torch.isnan(loss1) or torch.isnan(loss2) or (loss_original is not None and torch.isnan(loss_original)):
                 # logger.warning(f"NaN loss detected (loss1: {loss1}, loss2: {loss2}). Skipping step.")
                 return loss_original if loss_original is not None else loss1
+
+            # if loss2.isnan():
+            #     loss2 = loss1
             
             torch.manual_seed(random_seed)
             for name, param in self.named_parameters_to_optim:
@@ -1125,14 +1814,353 @@ class OurTrainer(Trainer):
                         # print("update {} with hizoo".format(name))
                         pass
 
-                # if name == "model.decoder.layers.0.fc1.weight":
-                #     # print(1)
-                #     # import pdb; pdb.set_trace()
-                #     pass
+
+                if name == "model.decoder.layers.0.fc1.weight":
+                    # print(1)
+                    # import pdb; pdb.set_trace()
+                    pass
+
+                # import pdb; pdb.set_trace()
+            # loss_out = self.zo_forward(model, inputs)
+
 
         torch.cuda.empty_cache()
         return loss1
 
+    def myH(self, model, inputs, zo_learning_rate, Hessian_smooth):
+    
+        # if self.Hessian_matrix is None:
+        if not hasattr(self, 'Hessian_matrix'):
+            # self.zo_random_seed = np.random.randint(1000000000)
+            self.Hessian_matrix = {}
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+
+        self.named_parameters_to_optim = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.named_parameters_to_optim.append((name, param))
+
+        random_seed = np.random.randint(1000000000)
+        random_seed2 = np.random.randint(1000000000)
+        with torch.no_grad():
+            # loss_original = self.zo_forward(model, inputs)
+            self.zo_perturb_parameters(random_seed, scaling_factor=1)
+
+            # first function evaluation
+            # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
+            
+            loss1 = self.zo_forward(model, inputs)
+
+            self.zo_perturb_parameters(random_seed2, scaling_factor=1)
+
+            loss12 = self.zo_forward(model, inputs)
+
+            self.zo_perturb_parameters(random_seed, scaling_factor=-2)
+            loss22 = self.zo_forward(model, inputs)
+
+            # second function evaluation
+            # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=-2)
+            self.zo_perturb_parameters(random_seed2, scaling_factor=-1)
+            loss2 = self.zo_forward(model, inputs)
+
+            # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
+            # self.saved_model = copy.deepcopy(model)
+            
+            def vector_divide(s, t):
+                # s is a vector, t is a vector
+                # The output should be a matrix where each column i of the output matrix is s divided by t[i]
+                s = s.view(1, -1)
+                t = t.view(-1, 1)  # Reshape t to a column vector
+                S = s / t  # Broadcasting division across each row
+                return S  # Transpose to match the desired format
+            
+            def diag_divide(s, t):
+                # return element-wise division of two vectors
+                t[t == 0] = 1e-3
+                return s / t
+
+            projected_grad = loss1 - loss12 -loss2 + loss22
+            
+
+            g1 = torch.Generator(model.device).manual_seed(random_seed)
+            g2 = torch.Generator(model.device).manual_seed(random_seed2)
+            for name, param in self.named_parameters_to_optim:
+                z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype, generator=g1)
+                z2 = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype, generator=g2)
+                
+                max_float16 = 50000
+                
+                # debuug code:
+                # nan_indices = torch.where(torch.isnan(self.Hessian_matrix[name][0]))[0]
+                # Hessian_estimator[0][nan_indices]
+                
+                # print(self.Hessian_matrix[name][0])
+
+                # self.Hessian_matrix[name] = ((1-Hessian_smooth) * self.Hessian_matrix[name] +  Hessian_smooth * Hessian_estimator)
+                # import pdb; pdb.set_trace()
+                grad = (loss1-loss2)/(2 * self.args.zo_eps) * z 
+
+
+                # t1 = diag_divide(grad, 2 *self.args.zo_eps * z)
+                # t1 = diag_divide()
+                t1 = projected_grad / (2 * self.args.zo_eps * self.args.zo_eps) 
+                # t1 = diag_divide(projected_grad , (2 * self.args.zo_eps ** 2) * z * z2)
+                t1.clamp_(min=-max_float16, max=max_float16)
+                t1 = t1 * z
+                # t1 = diag_divide(t1, z)
+                t1.clamp_(min=-max_float16, max=max_float16)
+                t1 = t1 * z2
+                # t1 = diag_divide(t1, z2)
+                t1.clamp_(min=-max_float16, max=max_float16)
+                # t2 = t1.t()
+                
+                # self.Hessian_matrix = 1/2 * (t1 + t2)
+                # self.Hessian_matrix = t1.abs()
+                # self.Hessian_matrix = 1/ self.Hessian_matrix
+                
+                self.Hessian_matrix = diag_divide(1, t1.abs())
+                print(self.Hessian_matrix)
+
+                d = torch.sqrt(self.Hessian_matrix)
+                d.clamp_(min=-max_float16, max=max_float16)
+                grad *= d
+                grad.clamp_(min=-max_float16, max=max_float16)
+                
+                param.data = param.data - zo_learning_rate * (grad + self.args.weight_decay * param.data)
+                param.data.clamp_(min=-max_float16, max=max_float16)
+                if param.data.isnan().any():
+                    import pdb; pdb.set_trace()
+
+                # if name == "model.decoder.layers[0].fc1.weight":
+                    # print(1)
+
+                # import pdb; pdb.set_trace()
+            loss_out = self.zo_forward(model, inputs)
+
+        return loss_out
+
+    def myzo(self, model, inputs, zo_learning_rate, Hessian_smooth):
+    
+        # if self.Hessian_matrix is None:
+        #     # self.zo_random_seed = np.random.randint(1000000000)
+        #     self.Hessian_matrix = {}
+        #     for name, param in model.named_parameters():
+        #         if param.requires_grad:
+        #             self.Hessian_matrix[name] = torch.ones(size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+
+        self.named_parameters_to_optim = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.named_parameters_to_optim.append((name, param))
+
+        random_seed = np.random.randint(1000000000)
+        with torch.no_grad():
+            loss_original = self.zo_forward(model, inputs)
+
+            # first function evaluation
+            # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
+            self.zo_perturb_parameters(random_seed, scaling_factor=1)
+            loss1 = self.zo_forward(model, inputs)
+
+
+            # second function evaluation
+            # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=-2)
+            self.zo_perturb_parameters(random_seed, scaling_factor=-2)
+            loss2 = self.zo_forward(model, inputs)
+
+            class ComputeCovA:
+
+                @classmethod
+                def __init__(cls, projected_grad, zo_learning_rate, weight_decay):
+                    cls.projected_grad = projected_grad
+                    cls.zo_learning_rate = zo_learning_rate
+                    cls.weight_decay = weight_decay
+
+                @classmethod
+                def __call__(cls, module, inputs):
+                    # if isinstance(module, nn.Linear):
+                    # print(module)
+                    if inputs[0].isnan().any():
+                        import pdb; pdb.set_trace()
+                    if hasattr(module, "weight"):
+                        # cov_a = cls.linear(module, inputs)
+                        # print(inputs[0].shape)
+                        # print(inputs[0])
+
+                        if (not isinstance(module, nn.Linear)) or (torch.tensor(module.weight.data.size()).max() > 768):
+                            z = torch.normal(mean=0, std=1, size=module.weight.data.size(), device=module.weight.data.device, dtype=module.weight.data.dtype)
+                            grad = cls.projected_grad * z
+                        else:
+                            grad = cls.linear(module, inputs)[0]
+                            if grad.isnan().any():
+                                import pdb; pdb.set_trace()
+                        module.weight.data -= cls.zo_learning_rate * (grad + cls.weight_decay * module.weight.data)
+                        if module.weight.data.isnan().any():
+                            import pdb;pdb.set_trace()
+                        if hasattr(module, "bias"):
+                            if module.bias is not None:
+                                z = torch.normal(mean=0, std=1, size=module.bias.data.size(), device=module.bias.data.device, dtype=module.bias.data.dtype)
+                                grad = cls.projected_grad * z
+                                module.bias.data -= cls.zo_learning_rate * (grad + cls.weight_decay * module.bias.data)
+                                if module.bias.data.isnan().any():
+                                    import pdb;pdb.set_trace()
+                    else:
+                        # FIXME(CW): for extension to other layers.
+                        # raise NotImplementedError
+                        # cov_a = None
+                        v = None
+                        pass
+
+                        # import pdb; pdb.set_trace()
+
+                    # return cov_a
+
+                @staticmethod
+                def linear(layer, inputs):
+                    # a: batch_size * in_dim
+
+                    activation = inputs[0].view(-1, layer.weight.size(1)).to(torch.float32)
+                    batch_size = activation.size(0)
+                    # if layer.bias is not None:
+                        # a = torch.cat([a, a.new(a.size(0), 1).fill_(1)], 1)
+
+                    # m_aa: [in_dim, in_dim]
+                    m_aa = activation.t() @ (activation / batch_size)
+                    max_float16 = 65504
+                    # m_aa.clamp_(max=max_float16)
+                    m_aa.clamp_(min=-max_float16, max=max_float16)
+                    # d_a: [in_dim] 
+                    # Q_a: [in_dim, in_dim]
+                    # d_a, Q_a = torch.symeig(m_aa, eigenvectors=True)
+                    try:
+                        d_a, Q_a = torch.linalg.eigh(m_aa, UPLO='U')
+                    except:
+                        import pdb; pdb.set_trace()
+                    d_a = d_a.to(inputs[0].dtype)
+                    d_a.clamp_(min=-max_float16, max=max_float16)
+                    Q_a = Q_a.to(inputs[0].dtype)
+                    Q_a.clamp_(min=-max_float16, max=max_float16)
+
+                    # weight: [out_dim, in_dim]
+                    param = layer.weight
+
+                    # z: [out_dim, in_dim]
+                    # g(grad): [out_dim, in_dim]
+                    z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+                    g = self.projected_grad * z
+                    # import pdb; pdb.set_trace()
+                    # p_grad_mat = g.view(activation.size())
+                    # p_grad_mat = g.view(-1,activation.size(1))
+                    p_grad_mat = g
+                    g = g.t()
+            
+                    m_gg = (g.t() @ (g / g.size(0))).to(torch.float32)
+                    m_gg.clamp_(min=-max_float16, max=max_float16)
+            
+                    # d_g, Q_g = torch.symeig(m_gg, eigenvectors=True)
+                    try:
+                        d_g, Q_g = torch.linalg.eigh(m_gg, UPLO='U')
+                    except:
+                        import pdb; pdb.set_trace()
+                    d_g = d_g.to(inputs[0].dtype)
+                    d_g.clamp_(min=-max_float16, max=max_float16)
+                    Q_g = Q_g.to(inputs[0].dtype)
+                    Q_g.clamp_(min=-max_float16, max=max_float16)
+
+                    
+                    # Q_g: [input, input]
+                    # p_grad_mat: [batch, input]
+
+                    v1 = Q_g.t() @ p_grad_mat @ Q_a
+                    damping = 0.001
+                    tmp = (d_g.unsqueeze(1) * d_a.unsqueeze(0) + damping)
+                    tmp.clamp_(min=-max_float16, max=max_float16)
+                    # v2 = v1 / (d_g.unsqueeze(1) * d_a.unsqueeze(0) + damping)
+                    v2 = v1/tmp
+                    v2.clamp_(min = -max_float16, max=max_float16)
+                    t1 = Q_g @ v2
+                    t2 = v2 @ Q_a.t()
+                    t2.clamp_(min = -max_float16, max=max_float16)
+                    # v = Q_g @ v2 @ Q_a.t()
+                    v = Q_g @ t2
+                    v.clamp_(min = -max_float16, max=max_float16)
+                    # v = [v.view(activation.data.size())]
+                    v = [v.view(p_grad_mat.size())]
+                    if v[0].isnan().any():
+                        import pdb; pdb.set_trace()
+                    return v
+
+                # skip kl clip for now
+                # vg_sum = 0
+                # for m in self.modules:
+                #     v = updates[m]
+                #     vg_sum += (v[0] * m.weight.grad.data * lr ** 2).sum().item()
+                #     if m.bias is not None:
+                #         vg_sum += (v[1] * m.bias.grad.data * lr ** 2).sum().item()
+                # nu = min(1.0, math.sqrt(self.kl_clip / vg_sum))
+
+
+
+            # import pdb; pdb.set_trace()
+            projected_grad = (loss1-loss2)/(2 * self.args.zo_eps)
+            self.projected_grad = projected_grad
+
+            # debug
+            # hooks = []
+            # for module in self.model.modules():
+            #     # classname = module.__class__.__name__
+            #     # print('=> We keep following layers in KFAC. <=')
+            #     # if classname in self.known_modules:
+            #         # self.modules.append(module)
+            #     # print(module)
+            #     # print("###")
+            #     if hasattr(module, 'weight'):
+            #         handle = module.register_forward_pre_hook(ComputeCovA(projected_grad, zo_learning_rate, self.args.weight_decay))
+            #         hooks.append(handle)
+            #         # print('(%s): %s' % (count, module))
+            #         # count += 1
+
+            # model = self.efficient_Hessian_perturb_parameters(model, random_seed, self.Hessian_matrix, scaling_factor=1)
+            self.zo_perturb_parameters(random_seed, scaling_factor=1)
+            # self.saved_model = copy.deepcopy(model)
+            
+            torch.manual_seed(random_seed)
+
+
+            # for name, param in self.named_parameters_to_optim:
+            #     z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+
+            #     # Hessian_temp = (1/self.Hessian_matrix[name] * z * z)
+            #     # Hessian_estimator = (torch.abs(loss1+loss2-2 * loss_original)* Hessian_temp  /(2 * self.args.zo_eps*self.args.zo_eps))
+                
+            #     # 设置上限值
+            #     # 65504 exceeds the max value of float16
+            #     # max_float16 = 65504
+            #     # Hessian_estimator.clamp_(max=max_float16)
+
+            #     # debuug code:
+            #     # nan_indices = torch.where(torch.isnan(self.Hessian_matrix[name][0]))[0]
+            #     # Hessian_estimator[0][nan_indices]
+                
+            #     # print(self.Hessian_matrix[name][0])
+
+            #     # self.Hessian_matrix[name] = ((1-Hessian_smooth) * self.Hessian_matrix[name] +  Hessian_smooth * Hessian_estimator)
+
+            #     grad = (loss1-loss2)/(2 * self.args.zo_eps) * z
+            #     param.data = param.data - zo_learning_rate * (grad + self.args.weight_decay * param.data)
+
+            #     # if name == "model.decoder.layers[0].fc1.weight":
+            #         # print(1)
+
+            #     # import pdb; pdb.set_trace()
+            loss_out = self.zo_forward(model, inputs)
+
+            # for handle in hooks:
+            #     handle.remove()
+
+        return loss_out
     ############## MeZO ##############
 
 
@@ -1248,6 +2276,42 @@ class OurTrainer(Trainer):
         
         return loss1
     
+    def svrg_step(self, model, inputs, flag):
+        """
+        Estimate gradient by MeZO. Return the loss from f(theta + z)
+        """
+        args = self.args
+
+        # Perturb running theta model
+
+        # What parameters to optimize 
+
+        # Sample the random seed for sampling z
+        self.zo_random_seed = np.random.randint(1000000000)
+
+
+        # First function evaluation
+        self.zo_perturb_parameters(scaling_factor=1)
+        loss1 = self.zo_forward(model, inputs)
+
+        # Second function evaluation
+        self.zo_perturb_parameters(scaling_factor=-2)
+        loss2 = self.zo_forward(model, inputs)
+
+        self.projected_grad = ((loss1 - loss2) / (2 * self.args.zo_eps)).item()
+
+        if flag == 1:
+            self.saved_grad = self.projected_grad
+
+        # No gradient accumulation support
+        assert self.args.gradient_accumulation_steps == 1
+
+        # Reset model back to its parameters at start of step
+        self.zo_perturb_parameters(scaling_factor=1)
+        
+        return loss1
+
+
 
     def zo_update(self, model):
         """
@@ -1284,6 +2348,62 @@ class OurTrainer(Trainer):
 
         self.lr_scheduler.step()
 
+    def svrg_update(self, model, flag = 1):
+        """
+        Update the parameters with the estimated gradients.
+        """
+        args = self.args
+
+        # Reset the random seed for sampling zs
+        torch.manual_seed(self.zo_random_seed)     
+
+        for name, param in self.named_parameters_to_optim:
+            # Resample z
+            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            if "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
+                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
+            else:
+                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
+
+            if flag == 0:
+                param.data = param.data - self._get_learning_rate() * (self.saved_grad * z + args.weight_decay * param.data)
+
+        self.lr_scheduler.step()
+
+    def zo_vrpge_update(self, model):
+        """
+        Update the parameters with the estimated gradients.
+        """
+        args = self.args
+        args.K = 2
+
+        # Reset the random seed for sampling zs
+        torch.manual_seed(self.zo_random_seed)     
+
+        for name, param in self.named_parameters_to_optim:
+            # Resample z
+            z = torch.normal(mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype)
+            # if "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
+            #     param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
+            # else:
+            #     param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
+            if "scores" in name:
+                pass
+            # if False:
+                # param.data = param.data - 10 * self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
+                # param.data = param.data - 10 * 1/(args.K-1)*(self.fn_list[0] - self.fn_avg)*getattr(m, 'stored_mask_0') + 1/(args.K-1)*(self.fn_list[1] - self.fn_avg)*getattr(m, 'stored_mask_1')
+            elif "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
+                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z + args.weight_decay * param.data)
+            else:
+                param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
+
+        for n, m in model.named_modules():
+            if hasattr(m, "scores"):
+                # import pdb; pdb.set_trace()
+                m.scores.data = m.scores.data - 50000 * self._get_learning_rate() * ( 1/(args.K-1)*(self.fn_list[0] - self.fn_avg)*getattr(m, 'stored_mask_0') + 1/(args.K-1)*(self.fn_list[1] - self.fn_avg)*getattr(m, 'stored_mask_1'))
+                # pass
+
+        self.lr_scheduler.step()
 
     ############## Misc overload functions ##############
 
