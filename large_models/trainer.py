@@ -496,6 +496,12 @@ class OurTrainer(Trainer):
 
         self.current_step = -1
         
+        # Initialize progress bar and running loss
+        if not args.disable_tqdm:
+            self.remove_callback(ProgressCallback)
+            pbar = tqdm(total=max_steps, initial=self.state.global_step, desc="Training", dynamic_ncols=True)
+            running_loss = None
+
         if True:
             self.layer_numbers = []
             for name, param in model.named_parameters():
@@ -622,6 +628,21 @@ class OurTrainer(Trainer):
                 else:
                     tr_loss += tr_loss_step
 
+                if not args.disable_tqdm:
+                    # Update running loss
+                    current_loss = tr_loss_step.item()
+                    if running_loss is None:
+                        running_loss = current_loss
+                    else:
+                        running_loss = 0.9 * running_loss + 0.1 * current_loss
+                    
+                    logs = {'loss': f'{running_loss:.4f}'}
+                    try:
+                        logs['lr'] = f'{self._get_learning_rate():.2e}'
+                    except:
+                        pass
+                    pbar.set_postfix(logs)
+
                 self.current_flos += float(self.floating_point_ops(inputs))
 
                 # Optimizer step for deepspeed must be called on every step regardless of the value of gradient_accumulation_steps
@@ -676,6 +697,8 @@ class OurTrainer(Trainer):
                         model.zero_grad()
 
                     self.state.global_step += 1
+                    if not args.disable_tqdm:
+                        pbar.update(1)
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(args, self.state, self.control)
 
@@ -698,6 +721,9 @@ class OurTrainer(Trainer):
 
             if self.control.should_training_stop:
                 break
+
+        if not args.disable_tqdm:
+            pbar.close()
 
         if args.past_index and hasattr(self, "_past"):
             # Clean the state at the end of training
